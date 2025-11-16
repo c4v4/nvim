@@ -629,7 +629,7 @@ require("lazy").setup({
 					return vim.o.columns * 0.4
 				end
 			end,
-			open_mapping = [[<C-;>]],
+			open_mapping = [[<C-\\>]],
 			hide_numbers = true,
 			shade_terminals = false,
 			start_in_insert = true,
@@ -643,7 +643,7 @@ require("lazy").setup({
 			-- Single terminal instance, reused across all directories
 			local term = nil
 
-			vim.keymap.set({ "n", "t" }, "<C-;>", function()
+			vim.keymap.set({ "n", "t" }, "<C-\\>", function()
 				if not term then
 					term = require("toggleterm.terminal").Terminal:new({ dir = get_smart_cwd() })
 				end
