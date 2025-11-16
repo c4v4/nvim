@@ -565,7 +565,7 @@ require('lazy').setup {
 
       -- PRIMARY KEYMAPS
       vim.keymap.set('n', '<C-p>', with_context(smart_find_files), { desc = 'Find files' })
-      vim.keymap.set('n', '<C-S-p>', two_stage_find, { desc = 'Find files (dir → file)' })
+      vim.keymap.set('n', '<C-l>', two_stage_find, { desc = 'Find files (dir → file)' })
 
       -- SEARCH NAMESPACE (leader-s)
       vim.keymap.set('n', '<leader>sr', builtin.resume, { desc = 'Resume search' })
@@ -598,8 +598,8 @@ require('lazy').setup {
         if term.direction == 'vertical' then
           return vim.o.columns * 0.4
         end
-      end,
-      open_mapping = [[<C-Space>]],
+  end,
+  open_mapping = [[<C-Space>]],
       hide_numbers = true,
       shade_terminals = false,
       start_in_insert = true,
