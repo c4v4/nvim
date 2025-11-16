@@ -590,7 +590,7 @@ require("lazy").setup({
 
 			-- PRIMARY KEYMAPS
 			vim.keymap.set("n", "<C-p>", with_context(smart_find_files), { desc = "Find files" })
-			vim.keymap.set("n", "<C-l>", two_stage_find, { desc = "Find files (dir → file)" })
+			vim.keymap.set("n", "<C-S-p>", two_stage_find, { desc = "Find files (dir → file)" })
 
 			-- SEARCH NAMESPACE (leader-s)
 			vim.keymap.set("n", "<leader>sr", builtin.resume, { desc = "Resume search" })
