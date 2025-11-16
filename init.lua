@@ -101,7 +101,7 @@ vim.keymap.set('n', '<C-k>', '<C-w>k', { desc = 'Go to upper window' })
 vim.keymap.set('n', '<C-l>', '<C-w>l', { desc = 'Go to right window' })
 
 -- Terminal mode mappings
-vim.keymap.set('t', '<Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
+vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
 vim.keymap.set('t', '<C-h>', '<C-\\><C-n><C-w>h', { desc = 'Go to left window from terminal' })
 vim.keymap.set('t', '<C-j>', '<C-\\><C-n><C-w>j', { desc = 'Go to lower window from terminal' })
 vim.keymap.set('t', '<C-k>', '<C-\\><C-n><C-w>k', { desc = 'Go to upper window from terminal' })
@@ -593,13 +593,13 @@ require('lazy').setup {
     opts = {
       size = function(term)
         if term.direction == 'horizontal' then
-          return 15
+          return vim.o.lines * 0.4 
         end
         if term.direction == 'vertical' then
           return vim.o.columns * 0.4
         end
       end,
-      open_mapping = [[<c-\>]],
+      open_mapping = [[<C-Space>]],
       hide_numbers = true,
       shade_terminals = false,
       start_in_insert = true,
@@ -613,7 +613,7 @@ require('lazy').setup {
       -- Single terminal instance, reused across all directories
       local term = nil
 
-      vim.keymap.set('n', '<C-\\>', function()
+      vim.keymap.set({'n', 't'}, '<C-Space>', function()
         if not term then
           term = require('toggleterm.terminal').Terminal:new { dir = get_smart_cwd() }
         end
