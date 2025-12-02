@@ -228,6 +228,108 @@ vim.api.nvim_create_autocmd("CursorHold", {
 })
 
 -- ============================================================================
+-- FILE GIT HISTORY NAVIGATOR IN SPLIT VIEW
+-- ============================================================================
+local git_history_state = {
+	commits = {},
+	index = 0,
+	original_buf = nil,
+	diff_buf = nil,
+	diff_win = nil,
+}
+
+local function load_file_history()
+	local file = vim.fn.expand("%:p")
+	local output = vim.fn.systemlist("git log --format=%H -- " .. vim.fn.shellescape(file))
+	return output
+end
+
+local function show_commit_diff(commit_hash)
+	local file = vim.fn.expand("%:p")
+	local content = vim.fn.systemlist(
+		"git show " .. commit_hash .. ":" .. vim.fn.shellescape(file:gsub(vim.fn.getcwd() .. "/", ""))
+	)
+
+	-- Save cursor position from original window
+	local cursor_pos = vim.api.nvim_win_get_cursor(git_history_state.original_buf)
+
+	-- Create or reuse diff buffer
+	if not git_history_state.diff_buf or not vim.api.nvim_buf_is_valid(git_history_state.diff_buf) then
+		vim.cmd("vsplit")
+		git_history_state.diff_win = vim.api.nvim_get_current_win()
+		git_history_state.diff_buf = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_win_set_buf(git_history_state.diff_win, git_history_state.diff_buf)
+	end
+
+	-- Load commit content
+	vim.api.nvim_buf_set_lines(git_history_state.diff_buf, 0, -1, false, content)
+	vim.bo[git_history_state.diff_buf].filetype = vim.bo.filetype
+	vim.bo[git_history_state.diff_buf].buftype = "nofile"
+
+	-- Disable folding in diff buffer
+	vim.api.nvim_set_current_win(git_history_state.diff_win)
+	vim.wo[git_history_state.diff_win].foldenable = false
+	vim.wo[git_history_state.diff_win].foldmethod = "manual"
+
+	-- Set cursor to same position
+	pcall(vim.api.nvim_win_set_cursor, git_history_state.diff_win, cursor_pos)
+
+	-- Enable diff mode
+	vim.cmd("windo diffthis")
+
+	-- Disable folding in both windows after diff is enabled
+	vim.api.nvim_set_current_win(git_history_state.original_buf)
+	vim.wo[git_history_state.original_buf].foldenable = false
+	vim.api.nvim_set_current_win(git_history_state.diff_win)
+	vim.wo[git_history_state.diff_win].foldenable = false
+
+	-- Show commit info
+	local commit_info = vim.fn.systemlist('git show --no-patch --format="%h %s (%ar)" ' .. commit_hash)[1]
+	vim.notify("Showing: " .. commit_info, vim.log.levels.INFO)
+
+	-- Return to original window
+	vim.api.nvim_set_current_win(git_history_state.original_buf)
+end
+
+vim.keymap.set("n", "<leader>gH", function()
+	git_history_state.commits = load_file_history()
+	if #git_history_state.commits == 0 then
+		vim.notify("No git history for this file", vim.log.levels.WARN)
+		return
+	end
+
+	git_history_state.index = 1
+	git_history_state.original_buf = vim.api.nvim_get_current_win()
+	show_commit_diff(git_history_state.commits[1])
+end, { desc = "Start git history browser" })
+
+vim.keymap.set("n", "[g", function()
+	if git_history_state.index < #git_history_state.commits then
+		git_history_state.index = git_history_state.index + 1
+		show_commit_diff(git_history_state.commits[git_history_state.index])
+	else
+		vim.notify("Already at oldest commit", vim.log.levels.WARN)
+	end
+end, { desc = "Older commit" })
+
+vim.keymap.set("n", "]g", function()
+	if git_history_state.index > 1 then
+		git_history_state.index = git_history_state.index - 1
+		show_commit_diff(git_history_state.commits[git_history_state.index])
+	else
+		vim.notify("Already at newest commit", vim.log.levels.WARN)
+	end
+end, { desc = "Newer commit" })
+
+vim.keymap.set("n", "<leader>gq", function()
+	if git_history_state.diff_win and vim.api.nvim_win_is_valid(git_history_state.diff_win) then
+		vim.cmd("diffoff!")
+		vim.api.nvim_win_close(git_history_state.diff_win, true)
+	end
+	git_history_state = { commits = {}, index = 0, original_buf = nil, diff_buf = nil, diff_win = nil }
+end, { desc = "Close git history" })
+
+-- ============================================================================
 -- PLUGIN MANAGER
 -- ============================================================================
 
@@ -629,7 +731,7 @@ require("lazy").setup({
 					return vim.o.columns * 0.4
 				end
 			end,
-			open_mapping = [[<C-\\>]],
+			open_mapping = [[<c-\>]],
 			hide_numbers = true,
 			shade_terminals = false,
 			start_in_insert = true,
@@ -682,7 +784,7 @@ require("lazy").setup({
 		end,
 	},
 
-	-- Git signs (inline diff markers)
+	-- Git signs (inline diff markers
 	{
 		"lewis6991/gitsigns.nvim",
 		opts = {
@@ -1013,6 +1115,14 @@ require("lazy").setup({
 				end,
 				desc = "Format buffer",
 			},
+			{
+				"<leader>f",
+				function()
+					require("conform").format({ async = true, lsp_fallback = false })
+				end,
+				mode = "v",
+				desc = "Format selection",
+			},
 		},
 	},
 
@@ -1050,7 +1160,17 @@ require("lazy").setup({
 			vim.api.nvim_create_autocmd("VimEnter", {
 				callback = function()
 					if vim.fn.argc() == 0 then
-						persistence.load({ last = true })
+						require("persistence").load({ last = true })
+						vim.schedule(function()
+							-- Force reload all buffers to trigger treesitter
+							for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+								if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == "" then
+									vim.api.nvim_buf_call(buf, function()
+										vim.cmd("edit")
+									end)
+								end
+							end
+						end)
 					end
 				end,
 			})
@@ -1088,16 +1208,4 @@ require("lazy").setup({
 			},
 		},
 	},
-})
-
--- Reload treesitter since sometimes it gets messed up by persistent auto-load
-vim.api.nvim_create_autocmd("VimEnter", {
-	callback = function()
-		if vim.fn.argc() == 0 then
-			require("persistence").load({ last = true })
-			vim.schedule(function()
-				vim.cmd("doautocmd BufRead")
-			end)
-		end
-	end,
 })
