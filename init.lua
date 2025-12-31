@@ -426,169 +426,53 @@ require("lazy").setup({
 				"nvim-telescope/telescope-fzf-native.nvim",
 				build = "cmake -S. -Bbuild -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release",
 			},
+			"nvim-telescope/telescope-file-browser.nvim",
 		},
 		config = function()
 			local telescope = require("telescope")
 			local actions = require("telescope.actions")
 			local action_state = require("telescope.actions.state")
-			local finders = require("telescope.finders")
-			local pickers = require("telescope.pickers")
 			local builtin = require("telescope.builtin")
-			local conf = require("telescope.config").values
+			local fb_actions = require("telescope").extensions.file_browser.actions
 
-			-- Shared scope navigation mappings
-			local function scope_nav_mappings(scope_var, reopen_fn)
-				local buffer_dir = get_buffer_context().dir
-				return function(prompt_bufnr, map)
-					local function get_query()
-						return action_state.get_current_picker(prompt_bufnr):_get_prompt()
-					end
+			-- Cache fd command
+			local fd_command = vim.fn.executable("fd") == 1
+					and { "fd", "--type", "f", "--hidden", "--no-ignore-vcs", "--exclude", ".git" }
+				or nil
 
-					local function reopen_with(new_scope)
-						local query = get_query()
-						actions.close(prompt_bufnr)
-						vim.schedule(function()
-							reopen_fn(new_scope, query)
-						end)
-					end
+			-- State for directory picker workflow
+			local picker_state = {
+				mode = nil, -- "find_files" or "live_grep"
+				original_cwd = nil,
+				grep_filters = { include = {}, exclude = {} },
+			}
 
-					-- Ctrl-u: up one level
-					map("i", "<C-u>", function()
-						local parent = vim.fn.fnamemodify(scope_var, ":h")
-						if parent == scope_var then
-							vim.notify("Already at filesystem root", vim.log.levels.WARN)
-							return
-						end
-						reopen_with(parent)
-					end)
-
-					-- Ctrl-d: down to buffer directory
-					map("i", "<C-d>", function()
-						if buffer_dir == scope_var then
-							vim.notify("Already at buffer directory", vim.log.levels.WARN)
-							return
-						end
-
-						local parent = vim.fn.fnamemodify(buffer_dir, ":h")
-						while parent ~= scope_var and parent ~= buffer_dir do
-							buffer_dir = parent
-							parent = vim.fn.fnamemodify(buffer_dir, ":h")
-						end
-
-						if parent == buffer_dir then
-							vim.notify("Buffer is not under current scope", vim.log.levels.WARN)
-							return
-						end
-
-						reopen_with(buffer_dir)
-					end)
-
-					return true
-				end
-			end
-
-			-- Smart file finder with scope expansion
-			local current_file_scope = nil
-			local function smart_find_files(scope, query)
-				current_file_scope = scope
-				local find_command = vim.fn.executable("fd") == 1
-						and {
-							"fd",
-							"--type",
-							"f",
-							"--hidden",
-							"--no-ignore-vcs",
-							"--exclude",
-							".git",
-							"--exclude",
-							"build",
-						}
-					or nil
+			-- Smart file finder
+			local function smart_find_files(opts)
+				opts = opts or {}
+				local path = opts.cwd or get_smart_cwd()
 
 				builtin.find_files({
-					cwd = scope,
-					find_command = find_command,
-					default_text = query or "",
-					prompt_title = "📁" .. vim.fn.fnamemodify(scope, ":~"),
-					attach_mappings = scope_nav_mappings(current_file_scope, smart_find_files),
-				})
-			end
-
-			-- Smart live grep with scope expansion and filtering
-			local current_grep_scope = nil
-			local grep_filters = { include = {}, exclude = {} }
-
-			local function format_filter_display()
-				local parts = {}
-				if #grep_filters.include > 0 then
-					table.insert(parts, "+" .. table.concat(grep_filters.include, " +"))
-				end
-				if #grep_filters.exclude > 0 then
-					table.insert(parts, "-" .. table.concat(grep_filters.exclude, " -"))
-				end
-				return #parts > 0 and " [" .. table.concat(parts, " ") .. "]" or ""
-			end
-
-			local function build_glob_args()
-				local args = {}
-				for _, pattern in ipairs(grep_filters.include) do
-					table.insert(args, "--glob")
-					table.insert(args, pattern)
-				end
-				for _, pattern in ipairs(grep_filters.exclude) do
-					table.insert(args, "--glob")
-					table.insert(args, "!" .. pattern)
-				end
-				return args
-			end
-
-			local function smart_live_grep(scope, query)
-				current_grep_scope = scope
-				local additional_args = build_glob_args()
-				local filter_display = format_filter_display()
-
-				builtin.live_grep({
-					cwd = scope,
-					default_text = query or "",
-					prompt_title = "🔍 " .. vim.fn.fnamemodify(scope, ":~") .. filter_display,
-					additional_args = function()
-						return additional_args
-					end,
+					cwd = path,
+					find_command = fd_command,
+					prompt_title = "📁" .. vim.fn.fnamemodify(path, ":~"),
 					attach_mappings = function(prompt_bufnr, map)
-						scope_nav_mappings(current_grep_scope, smart_live_grep)(prompt_bufnr, map)
-
-						-- <C-f>: Add filters
-						map("i", "<C-f>", function()
-							local filter_input = vim.fn.input("Filter (+include -exclude): ")
-							if filter_input == "" then
-								return
-							end
-
-							grep_filters = { include = {}, exclude = {} }
-							for token in filter_input:gmatch("%S+") do
-								if token:sub(1, 1) == "+" then
-									table.insert(grep_filters.include, token:sub(2))
-								elseif token:sub(1, 1) == "-" then
-									table.insert(grep_filters.exclude, token:sub(2))
-								else
-									table.insert(grep_filters.include, token)
-								end
-							end
-
-							local current_query = action_state.get_current_picker(prompt_bufnr):_get_prompt()
+						-- <C-b>: Open directory picker
+						map("i", "<C-b>", function()
+							picker_state.mode = "find_files"
+							picker_state.original_cwd = path
 							actions.close(prompt_bufnr)
 							vim.schedule(function()
-								smart_live_grep(current_grep_scope, current_query)
+								directory_picker_for_mode(path)
 							end)
 						end)
 
-						-- <C-x>: Clear filters
-						map("i", "<C-x>", function()
-							grep_filters = { include = {}, exclude = {} }
-							local current_query = action_state.get_current_picker(prompt_bufnr):_get_prompt()
+						map("n", "<C-b>", function()
+							picker_state.mode = "find_files"
+							picker_state.original_cwd = path
 							actions.close(prompt_bufnr)
 							vim.schedule(function()
-								smart_live_grep(current_grep_scope, current_query)
+								directory_picker_for_mode(path)
 							end)
 						end)
 
@@ -597,48 +481,149 @@ require("lazy").setup({
 				})
 			end
 
-			-- Two-stage picker: directory → file
-			local current_dir_scope = nil
-			local function show_dirs(scope, query)
-				current_dir_scope = scope
-				local dirs = vim.fn.systemlist(
-					"fd --type d --max-depth 3 --hidden --exclude .git --exclude node_modules --exclude Library --exclude .cache --exclude .Trash . "
-						.. vim.fn.shellescape(scope)
-				)
-
-				pickers
-					.new({}, {
-						prompt_title = "📁 " .. vim.fn.fnamemodify(scope, ":~"),
-						default_text = query or "",
-						finder = finders.new_table({
-							results = dirs,
-							entry_maker = function(entry)
-								local rel = entry:gsub(vim.pesc(scope), ".")
-								return { value = entry, display = rel, ordinal = rel }
-							end,
-						}),
-						sorter = conf.generic_sorter({}),
-						previewer = require("telescope.previewers").new_termopen_previewer({
-							get_command = function(entry)
-								return { "ls", "-lah", "--color=always", entry.value }
-							end,
-						}),
-						attach_mappings = function(prompt_bufnr, map)
-							actions.select_default:replace(function()
-								local selection = action_state.get_selected_entry()
-								actions.close(prompt_bufnr)
-								vim.schedule(function()
-									smart_find_files(selection.value)
-								end)
-							end)
-							return scope_nav_mappings(current_dir_scope, show_dirs)(prompt_bufnr, map)
-						end,
-					})
-					:find()
+			-- Smart live grep with filtering
+			local function format_filter_display()
+				local parts = {}
+				for _, p in ipairs(picker_state.grep_filters.include) do
+					table.insert(parts, "+" .. p)
+				end
+				for _, p in ipairs(picker_state.grep_filters.exclude) do
+					table.insert(parts, "-" .. p)
+				end
+				return #parts > 0 and " [" .. table.concat(parts, " ") .. "]" or ""
 			end
 
-			local function two_stage_find()
-				show_dirs(get_smart_cwd())
+			local function build_glob_args()
+				local args = {}
+				for _, pattern in ipairs(picker_state.grep_filters.include) do
+					table.insert(args, "--glob")
+					table.insert(args, pattern)
+				end
+				for _, pattern in ipairs(picker_state.grep_filters.exclude) do
+					table.insert(args, "--glob")
+					table.insert(args, "!" .. pattern)
+				end
+				return args
+			end
+
+			local function smart_live_grep(opts)
+				opts = opts or {}
+				local path = opts.cwd or get_smart_cwd()
+				local additional_args = build_glob_args()
+				local filter_display = format_filter_display()
+
+				builtin.live_grep({
+					cwd = path,
+					prompt_title = "🔍 " .. vim.fn.fnamemodify(path, ":~") .. filter_display,
+					additional_args = function()
+						return additional_args
+					end,
+					attach_mappings = function(prompt_bufnr, map)
+						-- <C-b>: Open directory picker
+						map("i", "<C-b>", function()
+							picker_state.mode = "live_grep"
+							picker_state.original_cwd = path
+							actions.close(prompt_bufnr)
+							vim.schedule(function()
+								directory_picker_for_mode(path)
+							end)
+						end)
+
+						map("n", "<C-b>", function()
+							picker_state.mode = "live_grep"
+							picker_state.original_cwd = path
+							actions.close(prompt_bufnr)
+							vim.schedule(function()
+								directory_picker_for_mode(path)
+							end)
+						end)
+
+						-- <C-f>: Add filters
+						map("i", "<C-f>", function()
+							local filter_input = vim.fn.input("Filter (+include -exclude): ")
+							if filter_input == "" then
+								return
+							end
+
+							picker_state.grep_filters = { include = {}, exclude = {} }
+							for token in filter_input:gmatch("%S+") do
+								if token:sub(1, 1) == "+" then
+									table.insert(picker_state.grep_filters.include, token:sub(2))
+								elseif token:sub(1, 1) == "-" then
+									table.insert(picker_state.grep_filters.exclude, token:sub(2))
+								else
+									table.insert(picker_state.grep_filters.include, token)
+								end
+							end
+
+							actions.close(prompt_bufnr)
+							vim.schedule(smart_live_grep)
+						end)
+
+						-- <C-x>: Clear filters
+						map("i", "<C-x>", function()
+							picker_state.grep_filters = { include = {}, exclude = {} }
+							actions.close(prompt_bufnr)
+							vim.schedule(smart_live_grep)
+						end)
+
+						return true
+					end,
+				})
+			end
+
+			-- Directory picker for mode switching
+			function directory_picker_for_mode(start_path)
+				telescope.extensions.file_browser.file_browser({
+					path = start_path,
+					cwd = start_path,
+					respect_gitignore = false,
+					hidden = true,
+					grouped = true,
+					prompt_title = "📂 Select Directory (<C-b> to confirm)",
+					attach_mappings = function(prompt_bufnr, map)
+						-- <C-b>: Select current directory and return to previous mode
+						local function select_and_return()
+							local current_picker = action_state.get_current_picker(prompt_bufnr)
+							local finder = current_picker.finder
+							local selected_dir = finder.path
+
+							actions.close(prompt_bufnr)
+
+							vim.schedule(function()
+								if picker_state.mode == "find_files" then
+									smart_find_files({ cwd = selected_dir })
+								elseif picker_state.mode == "live_grep" then
+									smart_live_grep({ cwd = selected_dir })
+								end
+
+								-- Reset state
+								picker_state.mode = nil
+								picker_state.original_cwd = nil
+							end)
+						end
+
+						map("i", "<C-b>", select_and_return)
+						map("n", "<C-b>", select_and_return)
+
+						-- Override default selection to navigate into directories
+						actions.select_default:replace(fb_actions.change_cwd)
+
+						return true
+					end,
+				})
+			end
+
+			-- File browser (standalone mode)
+			local function file_browser_mode()
+				local ctx = get_buffer_context()
+				local start_path = ctx.is_real_file and ctx.dir or get_smart_cwd()
+
+				telescope.extensions.file_browser.file_browser({
+					path = start_path,
+					cwd = start_path,
+					respect_gitignore = false,
+				})
 			end
 
 			-- Telescope setup
@@ -646,10 +631,13 @@ require("lazy").setup({
 				defaults = {
 					mappings = {
 						i = {
-							["<esc>"] = actions.close,
+							["<esc>"] = function()
+								vim.cmd("stopinsert")
+							end,
 							["<C-q>"] = actions.send_to_qflist + actions.open_qflist,
 						},
 						n = {
+							["<esc>"] = actions.close,
 							["q"] = actions.close,
 							["<C-q>"] = actions.send_to_qflist + actions.open_qflist,
 						},
@@ -658,7 +646,6 @@ require("lazy").setup({
 					file_ignore_patterns = {
 						"%.git/",
 						"node_modules/",
-						"build/",
 						"%.o$",
 						"%.a$",
 						"%.so$",
@@ -673,32 +660,36 @@ require("lazy").setup({
 						},
 					},
 				},
+				extensions = {
+					file_browser = {
+						hijack_netrw = true,
+						respect_gitignore = false,
+						depth = 1,
+						mappings = {
+							i = {
+								["<esc>"] = function()
+									vim.cmd("stopinsert")
+								end,
+							},
+							n = {
+								["<esc>"] = actions.close,
+								["q"] = actions.close,
+							},
+						},
+					},
+				},
 			})
 
 			pcall(telescope.load_extension, "fzf")
-
-			-- Helper wrappers for context-aware pickers
-			local function with_context(fn)
-				return function()
-					fn(get_smart_cwd())
-				end
-			end
-
-			local function with_cwd(telescope_fn)
-				return function()
-					telescope_fn({ cwd = get_smart_cwd() })
-				end
-			end
+			pcall(telescope.load_extension, "file_browser")
 
 			-- PRIMARY KEYMAPS
-			vim.keymap.set("n", "<C-p>", with_context(smart_find_files), { desc = "Find files" })
-			vim.keymap.set("n", "<C-S-p>", two_stage_find, { desc = "Find files (dir → file)" })
+			vim.keymap.set("n", "<C-p>", smart_find_files, { desc = "Find files" })
 
 			-- SEARCH NAMESPACE (leader-s)
 			vim.keymap.set("n", "<leader>sr", builtin.resume, { desc = "Resume search" })
-			vim.keymap.set("n", "<leader>sf", with_context(smart_find_files), { desc = "Search files" })
-			vim.keymap.set("n", "<leader>sg", with_context(smart_live_grep), { desc = "Search grep" })
-			vim.keymap.set("n", "<leader>sw", with_cwd(builtin.grep_string), { desc = "Search word" })
+			vim.keymap.set("n", "<leader>sf", file_browser_mode, { desc = "File browser" })
+			vim.keymap.set("n", "<leader>sg", smart_live_grep, { desc = "Search grep" })
 			vim.keymap.set("n", "<leader>sb", builtin.buffers, { desc = "Search buffers" })
 			vim.keymap.set("n", "<leader>ss", builtin.lsp_document_symbols, { desc = "Search symbols (file)" })
 			vim.keymap.set(
@@ -710,11 +701,6 @@ require("lazy").setup({
 			vim.keymap.set("n", "<leader>sh", builtin.help_tags, { desc = "Search help" })
 			vim.keymap.set("n", "<leader>sc", builtin.commands, { desc = "Search commands" })
 			vim.keymap.set("n", "<leader>sk", builtin.keymaps, { desc = "Search keymaps" })
-			vim.keymap.set("n", "<leader>st", builtin.colorscheme, { desc = "Search themes" })
-
-			-- QUICK ACCESS
-			vim.keymap.set("n", "<leader>/", with_context(smart_live_grep), { desc = "Grep (quick)" })
-			vim.keymap.set("n", "<leader>*", with_cwd(builtin.grep_string), { desc = "Grep word under cursor" })
 		end,
 	},
 
