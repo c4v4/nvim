@@ -740,6 +740,167 @@ require("lazy").setup({
 		end,
 	},
 
+	-- Claude Code Integration
+	{
+		"akinsho/toggleterm.nvim",
+		optional = true,
+		config = function()
+			local claude_state = {
+				term = nil,
+				pending_context = nil,
+			}
+
+			-- Build context string for Claude
+			local function get_claude_context()
+				local bufnr = vim.api.nvim_get_current_buf()
+
+				-- Skip if we're in a special buffer
+				if vim.bo[bufnr].buftype ~= "" then
+					-- Find last real buffer
+					for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+						if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == "" then
+							bufnr = buf
+							break
+						end
+					end
+				end
+
+				local bufpath = vim.api.nvim_buf_get_name(bufnr)
+				if bufpath == "" then
+					return nil
+				end
+
+				-- Get cursor position
+				local win = vim.fn.bufwinid(bufnr)
+				local cursor_line, cursor_col, topline, botline
+
+				if win ~= -1 then
+					-- Buffer is visible in a window
+					local cursor = vim.api.nvim_win_get_cursor(win)
+					cursor_line = cursor[1]
+					cursor_col = cursor[2] + 1
+					topline = vim.fn.line("w0", win)
+					botline = vim.fn.line("w$", win)
+				else
+					-- Buffer not visible, use reasonable defaults
+					cursor_line = 1
+					cursor_col = 1
+					topline = 1
+					botline = math.min(50, vim.api.nvim_buf_line_count(bufnr))
+				end
+
+				-- Get working directory context
+				local ctx = get_buffer_context()
+				local cwd = ctx.git_root or ctx.dir
+
+				return {
+					file = bufpath,
+					cursor_line = cursor_line,
+					cursor_col = cursor_col,
+					visible_start = topline,
+					visible_end = botline,
+					cwd = cwd,
+					bufnr = bufnr,
+				}
+			end
+
+			-- Format context for Claude prompt
+			local function format_context_message(ctx)
+				local relative_path = vim.fn.fnamemodify(ctx.file, ":~:.")
+				local msg = string.format(
+					"\n@%s#L%d-%d (cursor at L%d:%d)",
+					relative_path,
+					ctx.visible_start,
+					ctx.visible_end,
+					ctx.cursor_line,
+					ctx.cursor_col
+				)
+				return msg
+			end
+
+			-- Toggle Claude terminal
+			local function toggle_claude()
+				local current_ctx = get_claude_context()
+
+				if not claude_state.term then
+					local Terminal = require("toggleterm.terminal").Terminal
+					local cwd = current_ctx and current_ctx.cwd or vim.fn.getcwd()
+
+					-- Create terminal without specifying size (will be set after)
+					claude_state.term = Terminal:new({
+						cmd = "claude",
+						direction = "vertical",
+						dir = cwd,
+						on_open = function(term)
+							-- Force resize the window after opening
+							local win = vim.fn.bufwinid(term.bufnr)
+							if win ~= -1 then
+								local target_width = math.floor(vim.o.columns * 0.5)
+								vim.api.nvim_win_set_width(win, target_width)
+							end
+
+							vim.api.nvim_buf_set_option(term.bufnr, "spell", false)
+
+							local opts = { buffer = term.bufnr }
+
+							-- 'q' in normal mode to close
+							vim.keymap.set("n", "q", function()
+								term:close()
+							end, opts)
+
+							-- Map Enter in terminal insert mode
+							vim.keymap.set("t", "<CR>", function()
+								if claude_state.pending_context then
+									local msg = format_context_message(claude_state.pending_context)
+									local job_id = vim.b.terminal_job_id
+									-- Type the context as if user typed it
+									vim.fn.chansend(job_id, msg)
+									claude_state.pending_context = nil
+									-- Wait a tiny bit, then send Enter to submit
+									vim.defer_fn(function()
+										vim.fn.chansend(job_id, "\r")
+									end, 10)
+								else
+									-- No pending context, just send Enter normally
+									vim.fn.chansend(vim.b.terminal_job_id, "\r")
+								end
+							end, opts)
+						end,
+						on_close = function()
+							claude_state.pending_context = nil
+						end,
+					})
+				end
+
+				local target_win = (claude_state.term and claude_state.term.bufnr)
+						and vim.fn.bufwinid(claude_state.term.bufnr)
+					or -1
+				local is_claude_open = claude_state.term and claude_state.term:is_open() or false
+				local in_claude_window = target_win ~= -1 and vim.api.nvim_get_current_win() == target_win
+
+				-- If we're already in Claude window, toggle it closed
+				if in_claude_window then
+					claude_state.term:toggle()
+					return
+				end
+
+				-- If Claude is open but we're not in it, switch to it and update pending context
+				if is_claude_open then
+					vim.api.nvim_set_current_win(target_win)
+					-- Store context for later injection (on next Enter press)
+					claude_state.pending_context = current_ctx
+				else
+					-- Terminal is closed, open it and store context
+					claude_state.term:toggle()
+					claude_state.pending_context = current_ctx
+				end
+			end
+
+			-- Keymap to toggle Claude
+			vim.keymap.set({ "n", "t" }, "<leader>cc", toggle_claude, { desc = "Toggle Claude Code" })
+		end,
+	},
+
 	-- Git integration
 	{
 		"tpope/vim-fugitive",
