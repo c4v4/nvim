@@ -662,7 +662,7 @@ require("lazy").setup({
 				},
 				extensions = {
 					file_browser = {
-						hijack_netrw = true,
+						hijack_netrw = false,
 						respect_gitignore = false,
 						depth = 1,
 						mappings = {
@@ -728,23 +728,21 @@ require("lazy").setup({
 		config = function(_, opts)
 			require("toggleterm").setup(opts)
 
-			-- Single terminal instance, reused across all directories
+			-- Regular terminal instance (ID: 1)
 			local term = nil
 
 			vim.keymap.set({ "n", "t" }, "<C-\\>", function()
 				if not term then
-					term = require("toggleterm.terminal").Terminal:new({ dir = get_smart_cwd() })
+					term = require("toggleterm.terminal").Terminal:new({
+						id = 1, -- Explicit ID
+						direction = "horizontal",
+						dir = get_smart_cwd(),
+					})
 				end
 				term:toggle()
 			end, { desc = "Toggle terminal" })
-		end,
-	},
 
-	-- Claude Code Integration
-	{
-		"akinsho/toggleterm.nvim",
-		optional = true,
-		config = function()
+			-- Claude Code Integration
 			local claude_state = {
 				term = nil,
 				pending_context = nil,
@@ -800,13 +798,22 @@ require("lazy").setup({
 					visible_start = topline,
 					visible_end = botline,
 					cwd = cwd,
+					git_root = ctx.git_root,
 					bufnr = bufnr,
 				}
 			end
 
 			-- Format context for Claude prompt
 			local function format_context_message(ctx)
-				local relative_path = vim.fn.fnamemodify(ctx.file, ":~:.")
+				-- If we have a git root, make path relative to it
+				-- Otherwise use home-relative path
+				local relative_path
+				if ctx.git_root then
+					relative_path = vim.fn.fnamemodify(ctx.file, ":p"):gsub("^" .. vim.pesc(ctx.git_root) .. "/", "")
+				else
+					relative_path = vim.fn.fnamemodify(ctx.file, ":~")
+				end
+
 				local msg = string.format(
 					"\n@%s#L%d-%d (cursor at L%d:%d)",
 					relative_path,
@@ -826,8 +833,8 @@ require("lazy").setup({
 					local Terminal = require("toggleterm.terminal").Terminal
 					local cwd = current_ctx and current_ctx.cwd or vim.fn.getcwd()
 
-					-- Create terminal without specifying size (will be set after)
 					claude_state.term = Terminal:new({
+						id = 99, -- Explicit ID (different from regular terminal)
 						cmd = "claude",
 						direction = "vertical",
 						dir = cwd,
@@ -848,7 +855,7 @@ require("lazy").setup({
 								term:close()
 							end, opts)
 
-							-- Map Enter in terminal insert mode
+							-- Map Enter in terminal insert mode (only for Claude terminal)
 							vim.keymap.set("t", "<CR>", function()
 								if claude_state.pending_context then
 									local msg = format_context_message(claude_state.pending_context)
@@ -865,6 +872,9 @@ require("lazy").setup({
 									vim.fn.chansend(vim.b.terminal_job_id, "\r")
 								end
 							end, opts)
+
+							-- Preserve Shift-Enter for multiline input (don't map it)
+							-- Claude's native Shift-Enter will work as expected
 						end,
 						on_close = function()
 							claude_state.pending_context = nil
@@ -912,17 +922,17 @@ require("lazy").setup({
 					vim.notify("Not in a git repository", vim.log.levels.WARN)
 					return
 				end
-				vim.cmd("cd " .. ctx.git_root)
-				vim.cmd("Git")
+				vim.cmd.cd(ctx.git_root)
+				vim.cmd.Git()
 			end, { desc = "Git status" })
 
 			-- Git diff (buffer context aware)
 			vim.keymap.set("n", "<leader>gd", function()
 				local ctx = get_buffer_context()
 				if ctx.git_root then
-					vim.cmd("cd " .. ctx.git_root)
+					vim.cmd.cd(ctx.git_root)
 				end
-				vim.cmd("Gdiffsplit")
+				vim.cmd.Gdiffsplit()
 			end, { desc = "Git diff" })
 
 			-- Standard git commands
