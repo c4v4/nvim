@@ -747,154 +747,39 @@ require("lazy").setup({
 				end
 				term:toggle()
 			end, { desc = "Toggle terminal" })
+		end,
+	},
 
-			-- Claude Code Integration
-			local claude_term = nil
+	-- Claude Code Integration (via MCP WebSocket protocol)
+	{
+		"coder/claudecode.nvim",
+		dependencies = {
+			"folke/snacks.nvim",
+		},
+		config = function()
+			require("claudecode").setup({
+				terminal = {
+					split_side = "right",
+					split_width_percentage = 0.5,
+					provider = "snacks",
+				},
+				diff_opts = {
+					open_in_new_tab = true,
+					hide_terminal_in_new_tab = true,
+				},
+				focus_after_send = true,
+			})
 
-			-- Build context string for Claude
-			local function get_claude_context()
-				local bufnr = vim.api.nvim_get_current_buf()
-
-				-- Skip if we're in a special buffer
-				if vim.bo[bufnr].buftype ~= "" then
-					-- Find last real buffer
-					for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-						if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == "" then
-							bufnr = buf
-							break
-						end
-					end
-				end
-
-				local bufpath = vim.api.nvim_buf_get_name(bufnr)
-				if bufpath == "" then
-					return nil
-				end
-
-				-- Get cursor position
-				local win = vim.fn.bufwinid(bufnr)
-				local cursor_line, cursor_col, topline, botline
-
-				if win ~= -1 then
-					-- Buffer is visible in a window
-					local cursor = vim.api.nvim_win_get_cursor(win)
-					cursor_line = cursor[1]
-					cursor_col = cursor[2] + 1
-					topline = vim.fn.line("w0", win)
-					botline = vim.fn.line("w$", win)
-				else
-					-- Buffer not visible, use reasonable defaults
-					cursor_line = 1
-					cursor_col = 1
-					topline = 1
-					botline = math.min(50, vim.api.nvim_buf_line_count(bufnr))
-				end
-
-				-- Get working directory context
-				local ctx = get_buffer_context()
-				local cwd = ctx.git_root or ctx.dir
-
-				return {
-					file = bufpath,
-					cursor_line = cursor_line,
-					cursor_col = cursor_col,
-					visible_start = topline,
-					visible_end = botline,
-					cwd = cwd,
-					git_root = ctx.git_root,
-					bufnr = bufnr,
-				}
-			end
-
-			-- Format context for Claude prompt
-			local function format_context_message(ctx)
-				-- If we have a git root, make path relative to it
-				-- Otherwise use home-relative path
-				local relative_path
-				if ctx.git_root then
-					relative_path = vim.fn.fnamemodify(ctx.file, ":p"):gsub("^" .. vim.pesc(ctx.git_root) .. "/", "")
-				else
-					relative_path = vim.fn.fnamemodify(ctx.file, ":~")
-				end
-
-				return string.format(
-					"[cwd: %s]\n@%s#L%d-%d (cursor at L%d:%d)",
-					ctx.cwd,
-					relative_path,
-					ctx.visible_start,
-					ctx.visible_end,
-					ctx.cursor_line,
-					ctx.cursor_col
-				)
-			end
-
-			-- Inject context into Claude terminal (copies to clipboard for manual paste)
-			local function inject_claude_context()
-				local ctx = get_claude_context()
-				if not ctx then
-					vim.notify("No buffer context available", vim.log.levels.WARN)
-					return
-				end
-
-				local context_text = format_context_message(ctx)
-				vim.fn.setreg("+", context_text)
-				vim.fn.setreg('"', context_text)
-				vim.notify("Context copied: " .. ctx.file:match("[^/]+$"), vim.log.levels.INFO)
-			end
-
-			-- Toggle Claude terminal
-			local function toggle_claude()
-				if not claude_term then
-					local Terminal = require("toggleterm.terminal").Terminal
-					local ctx = get_claude_context()
-					local cwd = ctx and ctx.cwd or vim.fn.getcwd()
-
-					-- Validate directory exists
-					if vim.fn.isdirectory(cwd) == 0 then
-						cwd = vim.fn.getcwd()
-					end
-
-					claude_term = Terminal:new({
-						id = 99,
-						cmd = "claude",
-						direction = "vertical",
-						dir = cwd,
-						on_open = function(term)
-							local win = vim.fn.bufwinid(term.bufnr)
-							if win ~= -1 then
-								local target_width = math.floor(vim.o.columns * 0.5)
-								vim.api.nvim_win_set_width(win, target_width)
-								vim.api.nvim_set_option_value("spell", false, { win = win })
-							end
-
-							vim.keymap.set("n", "q", function()
-								term:close()
-							end, { buffer = term.bufnr })
-						end,
-					})
-				end
-
-				local target_win = claude_term.bufnr and vim.fn.bufwinid(claude_term.bufnr) or -1
-				local is_open = claude_term:is_open()
-				local in_claude_window = target_win ~= -1 and vim.api.nvim_get_current_win() == target_win
-
-				if in_claude_window then
-					-- In Claude window: hide it
-					claude_term:toggle()
-				elseif is_open then
-					-- Claude open but not focused: just focus (no startinsert to preserve prompt)
-					vim.api.nvim_set_current_win(target_win)
-				else
-					-- Claude not open: open it and enter insert mode
-					claude_term:toggle()
-					vim.schedule(function()
-						vim.cmd("startinsert")
-					end)
-				end
-			end
-
-			vim.keymap.set({ "n", "t" }, "<leader>cc", toggle_claude, { desc = "Toggle Claude Code" })
-			vim.keymap.set({ "n", "t" }, "<leader>ci", inject_claude_context, { desc = "Inject context to Claude" })
+			-- Keybindings (keeping <leader>c prefix)
+			vim.keymap.set({ "n", "t" }, "<leader>cc", "<cmd>ClaudeCode<cr>", { desc = "Toggle Claude Code" })
+			vim.keymap.set("v", "<leader>cs", function()
+				vim.cmd("ClaudeCodeSend")
+				vim.schedule(function()
+					vim.cmd("startinsert")
+				end)
+			end, { desc = "Send selection to Claude" })
+			vim.keymap.set("n", "<leader>cda", "<cmd>ClaudeCodeDiffAccept<cr>", { desc = "Accept Claude diff" })
+			vim.keymap.set("n", "<leader>cdd", "<cmd>ClaudeCodeDiffDeny<cr>", { desc = "Deny Claude diff" })
 		end,
 	},
 

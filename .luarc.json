@@ -1,6 +1,7 @@
 {
   "runtime.version": "LuaJIT",
-  "diagnostics.globals": ["vim"],
+  "diagnostics.globals": ["vim",
+        "directory_picker_for_mode"],
   "workspace.library": [
     "$VIMRUNTIME",
     "${3rd}/luv/library"
