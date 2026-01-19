@@ -733,20 +733,23 @@ require("lazy").setup({
 
 			vim.keymap.set({ "n", "t" }, "<C-\\>", function()
 				if not term then
+					local cwd = get_smart_cwd()
+					-- Validate directory exists
+					if vim.fn.isdirectory(cwd) == 0 then
+						cwd = vim.fn.getcwd()
+					end
+
 					term = require("toggleterm.terminal").Terminal:new({
 						id = 1, -- Explicit ID
 						direction = "horizontal",
-						dir = get_smart_cwd(),
+						dir = cwd,
 					})
 				end
 				term:toggle()
 			end, { desc = "Toggle terminal" })
 
 			-- Claude Code Integration
-			local claude_state = {
-				term = nil,
-				pending_context = nil,
-			}
+			local claude_term = nil
 
 			-- Build context string for Claude
 			local function get_claude_context()
@@ -814,100 +817,84 @@ require("lazy").setup({
 					relative_path = vim.fn.fnamemodify(ctx.file, ":~")
 				end
 
-				local msg = string.format(
-					"\n@%s#L%d-%d (cursor at L%d:%d)",
+				return string.format(
+					"[cwd: %s]\n@%s#L%d-%d (cursor at L%d:%d)",
+					ctx.cwd,
 					relative_path,
 					ctx.visible_start,
 					ctx.visible_end,
 					ctx.cursor_line,
 					ctx.cursor_col
 				)
-				return msg
+			end
+
+			-- Inject context into Claude terminal (copies to clipboard for manual paste)
+			local function inject_claude_context()
+				local ctx = get_claude_context()
+				if not ctx then
+					vim.notify("No buffer context available", vim.log.levels.WARN)
+					return
+				end
+
+				local context_text = format_context_message(ctx)
+				vim.fn.setreg("+", context_text)
+				vim.fn.setreg('"', context_text)
+				vim.notify("Context copied: " .. ctx.file:match("[^/]+$"), vim.log.levels.INFO)
 			end
 
 			-- Toggle Claude terminal
 			local function toggle_claude()
-				local current_ctx = get_claude_context()
-
-				if not claude_state.term then
+				if not claude_term then
 					local Terminal = require("toggleterm.terminal").Terminal
-					local cwd = current_ctx and current_ctx.cwd or vim.fn.getcwd()
+					local ctx = get_claude_context()
+					local cwd = ctx and ctx.cwd or vim.fn.getcwd()
 
-					claude_state.term = Terminal:new({
-						id = 99, -- Explicit ID (different from regular terminal)
+					-- Validate directory exists
+					if vim.fn.isdirectory(cwd) == 0 then
+						cwd = vim.fn.getcwd()
+					end
+
+					claude_term = Terminal:new({
+						id = 99,
 						cmd = "claude",
 						direction = "vertical",
 						dir = cwd,
 						on_open = function(term)
-							-- Force resize the window after opening
 							local win = vim.fn.bufwinid(term.bufnr)
 							if win ~= -1 then
 								local target_width = math.floor(vim.o.columns * 0.5)
 								vim.api.nvim_win_set_width(win, target_width)
+								vim.api.nvim_set_option_value("spell", false, { win = win })
 							end
 
-							vim.api.nvim_buf_set_option(term.bufnr, "spell", false)
-
-							local opts = { buffer = term.bufnr }
-
-							-- 'q' in normal mode to close
 							vim.keymap.set("n", "q", function()
 								term:close()
-							end, opts)
-
-							-- Map Enter in terminal insert mode (only for Claude terminal)
-							vim.keymap.set("t", "<CR>", function()
-								if claude_state.pending_context then
-									local msg = format_context_message(claude_state.pending_context)
-									local job_id = vim.b.terminal_job_id
-									-- Type the context as if user typed it
-									vim.fn.chansend(job_id, msg)
-									claude_state.pending_context = nil
-									-- Wait a tiny bit, then send Enter to submit
-									vim.defer_fn(function()
-										vim.fn.chansend(job_id, "\r")
-									end, 10)
-								else
-									-- No pending context, just send Enter normally
-									vim.fn.chansend(vim.b.terminal_job_id, "\r")
-								end
-							end, opts)
-
-							-- Preserve Shift-Enter for multiline input (don't map it)
-							-- Claude's native Shift-Enter will work as expected
-						end,
-						on_close = function()
-							claude_state.pending_context = nil
+							end, { buffer = term.bufnr })
 						end,
 					})
 				end
 
-				local target_win = (claude_state.term and claude_state.term.bufnr)
-						and vim.fn.bufwinid(claude_state.term.bufnr)
-					or -1
-				local is_claude_open = claude_state.term and claude_state.term:is_open() or false
+				local target_win = claude_term.bufnr and vim.fn.bufwinid(claude_term.bufnr) or -1
+				local is_open = claude_term:is_open()
 				local in_claude_window = target_win ~= -1 and vim.api.nvim_get_current_win() == target_win
 
-				-- If we're already in Claude window, toggle it closed
 				if in_claude_window then
-					claude_state.term:toggle()
-					return
-				end
-
-				-- If Claude is open but we're not in it, switch to it and update pending context
-				if is_claude_open then
+					-- In Claude window: hide it
+					claude_term:toggle()
+				elseif is_open then
+					-- Claude open but not focused: just focus (no startinsert to preserve prompt)
 					vim.api.nvim_set_current_win(target_win)
-					-- Store context for later injection (on next Enter press)
-					claude_state.pending_context = current_ctx
 				else
-					-- Terminal is closed, open it and store context
-					claude_state.term:toggle()
-					claude_state.pending_context = current_ctx
+					-- Claude not open: open it and enter insert mode
+					claude_term:toggle()
+					vim.schedule(function()
+						vim.cmd("startinsert")
+					end)
 				end
 			end
 
-			-- Keymap to toggle Claude
 			vim.keymap.set({ "n", "t" }, "<leader>cc", toggle_claude, { desc = "Toggle Claude Code" })
+			vim.keymap.set({ "n", "t" }, "<leader>ci", inject_claude_context, { desc = "Inject context to Claude" })
 		end,
 	},
 
