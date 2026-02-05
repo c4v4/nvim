@@ -580,6 +580,7 @@ require("lazy").setup({
 					respect_gitignore = false,
 					hidden = true,
 					grouped = true,
+					depth = 1, -- Don't recurse into subdirectories
 					prompt_title = "📂 Select Directory (<C-b> to confirm)",
 					attach_mappings = function(prompt_bufnr, map)
 						-- <C-b>: Select current directory and return to previous mode
@@ -606,8 +607,19 @@ require("lazy").setup({
 						map("i", "<C-b>", select_and_return)
 						map("n", "<C-b>", select_and_return)
 
-						-- Override default selection to navigate into directories
-						actions.select_default:replace(fb_actions.change_cwd)
+						-- Override default selection: directories -> navigate, files -> open
+						actions.select_default:replace(function(pb)
+							local entry = action_state.get_selected_entry()
+							if entry and entry.Path then
+								local path = entry.Path:absolute()
+								if vim.fn.isdirectory(path) == 1 then
+									fb_actions.change_cwd(pb)
+								else
+									actions.close(pb)
+									vim.cmd("edit " .. vim.fn.fnameescape(path))
+								end
+							end
+						end)
 
 						return true
 					end,
