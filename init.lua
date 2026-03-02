@@ -654,7 +654,8 @@ require("lazy").setup({
 							["<C-q>"] = actions.send_to_qflist + actions.open_qflist,
 						},
 					},
-					path_display = { "smart" },
+					path_display = { shorten = { len = 3, exclude = { -1, -2, -3 } } },
+				dynamic_preview_title = true,
 					file_ignore_patterns = {
 						"%.git/",
 						"node_modules/",
