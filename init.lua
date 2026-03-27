@@ -8,6 +8,88 @@ vim.g.maplocalleader = " "
 vim.g.loaded_netrw = 1
 vim.g.loaded_netrwPlugin = 1
 
+-- Make $EDITOR open files in this Neovim instance (e.g. Claude Code's "open in editor" shortcut).
+-- scripts/nvim-editor uses --remote-expr to call _nvim_editor_open, which opens the file in a
+-- centered floating window. q/<Esc> saves and closes the float; the script unblocks via sentinel.
+local _editor_script = vim.fn.stdpath("config") .. "/scripts/nvim-editor"
+if vim.fn.executable(_editor_script) == 1 then
+	vim.env.EDITOR = _editor_script
+	vim.env.VISUAL = _editor_script
+end
+
+-- Called by scripts/nvim-editor. Opens the file in a centered floating window so the
+-- existing layout is untouched. q/<Esc> writes the buffer to disk and signals the sentinel,
+-- unblocking the shell script so Claude Code reads the result.
+_G._nvim_editor_open = function(file, sentinel)
+	local abs_file = vim.fn.fnamemodify(file, ":p")
+
+	-- Load the buffer without touching any existing window.
+	-- buftype=nofile: excludes it from auto-save (prevents premature file writes
+	-- that could confuse Claude Code's file watcher before the user is done).
+	local bufnr = vim.fn.bufadd(abs_file)
+	vim.fn.bufload(bufnr)
+	vim.bo[bufnr].buftype = "nofile"
+
+	-- Float dimensions: 80% wide, 70% tall, centered
+	local width = math.floor(vim.o.columns * 0.8)
+	local height = math.floor(vim.o.lines * 0.7)
+	local row = math.floor((vim.o.lines - height) / 2)
+	local col = math.floor((vim.o.columns - width) / 2)
+
+	local win = vim.api.nvim_open_win(bufnr, true, {
+		relative = "editor",
+		width = width,
+		height = height,
+		row = row,
+		col = col,
+		style = "minimal",
+		border = "rounded",
+		title = " Claude Prompt -- q/<Esc> to send ",
+		title_pos = "center",
+	})
+
+	-- Disable nvim-cmp in this buffer (completions are irrelevant here and
+	-- confirming one was triggering Claude Code's file-watcher prematurely)
+	local cmp_ok, cmp = pcall(require, "cmp")
+	if cmp_ok then
+		cmp.setup.buffer({ enabled = false })
+	end
+
+	-- Define sentinel helpers before any autocmd references them
+	local sentinel_written = false
+	local function write_sentinel()
+		if not sentinel_written then
+			sentinel_written = true
+			vim.fn.writefile({}, sentinel)
+		end
+	end
+
+	-- Fallback: if buffer is deleted externally (e.g. :bwipeout from cmdline), write sentinel
+	vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
+		buffer = bufnr,
+		once = true,
+		callback = write_sentinel,
+	})
+
+	local function close()
+		-- Write buffer content directly to disk -- bypass :write and modified-flag checks
+		if vim.api.nvim_buf_is_valid(bufnr) then
+			local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+			vim.fn.writefile(lines, abs_file)
+		end
+		write_sentinel()
+		if vim.api.nvim_win_is_valid(win) then
+			vim.api.nvim_win_close(win, true)
+		end
+		if vim.api.nvim_buf_is_valid(bufnr) then
+			pcall(vim.cmd, "bdelete! " .. bufnr)
+		end
+	end
+
+	vim.keymap.set("n", "q", close, { buffer = bufnr, desc = "Send to Claude" })
+	vim.keymap.set("n", "<Esc>", close, { buffer = bufnr, desc = "Send to Claude" })
+end
+
 -- UI
 vim.opt.number = true
 vim.opt.relativenumber = true
@@ -24,7 +106,7 @@ vim.opt.splitbelow = true
 -- Search
 vim.opt.ignorecase = true
 vim.opt.smartcase = true
-vim.opt.hlsearch = false
+vim.opt.hlsearch = true
 vim.opt.incsearch = true
 
 -- Indentation
@@ -228,12 +310,84 @@ vim.api.nvim_create_autocmd("CursorHold", {
 })
 
 -- ============================================================================
+-- CLAUDE CODE DIFF VIEW WINBAR
+-- ============================================================================
+
+-- Helper to safely read winbar (option may not exist on older nvim)
+local function get_winbar(win)
+	local ok, val = pcall(vim.api.nvim_get_option_value, "winbar", { win = win })
+	return ok and val or nil
+end
+
+-- Shows [ORIGINAL]/[PROPOSED] + file path in winbar of both diff windows.
+-- Fires on window/option events; clears when diff is no longer active.
+local function update_claudecode_diff_winbars()
+	-- First pass: find proposed windows (identified by buffer variable set by claudecode.nvim)
+	local proposed_wins = {}
+	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+		if vim.api.nvim_win_is_valid(win) then
+			local buf = vim.api.nvim_win_get_buf(win)
+			local tab_name = vim.b[buf].claudecode_diff_tab_name
+			if tab_name then
+				table.insert(proposed_wins, { win = win, tab_name = tab_name })
+			end
+		end
+	end
+
+	-- No claudecode diff in this tab: clear any winbars we previously set
+	if #proposed_wins == 0 then
+		for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+			if vim.api.nvim_win_is_valid(win) then
+				local wb = get_winbar(win)
+				if wb and (wb:match("^%[PROPOSED%]") or wb:match("^%[ORIGINAL%]")) then
+					pcall(vim.api.nvim_set_option_value, "winbar", "", { win = win })
+				end
+			end
+		end
+		return
+	end
+
+	-- Set winbar on proposed windows
+	for _, info in ipairs(proposed_wins) do
+		local rel = vim.fn.fnamemodify(info.tab_name, ":~:.")
+		pcall(vim.api.nvim_set_option_value, "winbar", "[PROPOSED] " .. rel, { win = info.win })
+	end
+
+	-- Set winbar on original windows (diff mode on, no claudecode marker)
+	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+		if not vim.api.nvim_win_is_valid(win) then goto continue end
+		local buf = vim.api.nvim_win_get_buf(win)
+		if not vim.b[buf].claudecode_diff_tab_name and vim.wo[win].diff then
+			local path = vim.api.nvim_buf_get_name(buf)
+			local rel = path ~= "" and vim.fn.fnamemodify(path, ":~:.") or "[No Name]"
+			pcall(vim.api.nvim_set_option_value, "winbar", "[ORIGINAL] " .. rel, { win = win })
+		end
+		::continue::
+	end
+end
+
+vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter" }, {
+	desc = "Update winbar for Claude Code diff view",
+	callback = function()
+		vim.schedule(update_claudecode_diff_winbars)
+	end,
+})
+
+vim.api.nvim_create_autocmd("OptionSet", {
+	pattern = "diff",
+	desc = "Update winbar when diff mode changes",
+	callback = function()
+		vim.schedule(update_claudecode_diff_winbars)
+	end,
+})
+
+-- ============================================================================
 -- FILE GIT HISTORY NAVIGATOR IN SPLIT VIEW
 -- ============================================================================
 local git_history_state = {
 	commits = {},
 	index = 0,
-	original_buf = nil,
+	original_win = nil,
 	diff_buf = nil,
 	diff_win = nil,
 }
@@ -251,7 +405,7 @@ local function show_commit_diff(commit_hash)
 	)
 
 	-- Save cursor position from original window
-	local cursor_pos = vim.api.nvim_win_get_cursor(git_history_state.original_buf)
+	local cursor_pos = vim.api.nvim_win_get_cursor(git_history_state.original_win)
 
 	-- Create or reuse diff buffer
 	if not git_history_state.diff_buf or not vim.api.nvim_buf_is_valid(git_history_state.diff_buf) then
@@ -278,8 +432,8 @@ local function show_commit_diff(commit_hash)
 	vim.cmd("windo diffthis")
 
 	-- Disable folding in both windows after diff is enabled
-	vim.api.nvim_set_current_win(git_history_state.original_buf)
-	vim.wo[git_history_state.original_buf].foldenable = false
+	vim.api.nvim_set_current_win(git_history_state.original_win)
+	vim.wo[git_history_state.original_win].foldenable = false
 	vim.api.nvim_set_current_win(git_history_state.diff_win)
 	vim.wo[git_history_state.diff_win].foldenable = false
 
@@ -288,7 +442,7 @@ local function show_commit_diff(commit_hash)
 	vim.notify("Showing: " .. commit_info, vim.log.levels.INFO)
 
 	-- Return to original window
-	vim.api.nvim_set_current_win(git_history_state.original_buf)
+	vim.api.nvim_set_current_win(git_history_state.original_win)
 end
 
 vim.keymap.set("n", "<leader>gH", function()
@@ -299,7 +453,7 @@ vim.keymap.set("n", "<leader>gH", function()
 	end
 
 	git_history_state.index = 1
-	git_history_state.original_buf = vim.api.nvim_get_current_win()
+	git_history_state.original_win = vim.api.nvim_get_current_win()
 	show_commit_diff(git_history_state.commits[1])
 end, { desc = "Start git history browser" })
 
@@ -326,7 +480,7 @@ vim.keymap.set("n", "<leader>gq", function()
 		vim.cmd("diffoff!")
 		vim.api.nvim_win_close(git_history_state.diff_win, true)
 	end
-	git_history_state = { commits = {}, index = 0, original_buf = nil, diff_buf = nil, diff_win = nil }
+	git_history_state = { commits = {}, index = 0, original_win = nil, diff_buf = nil, diff_win = nil }
 end, { desc = "Close git history" })
 
 -- ============================================================================
@@ -404,8 +558,8 @@ require("lazy").setup({
 			incremental_selection = {
 				enable = true,
 				keymaps = {
-					init_selection = "<CR>",
-					node_incremental = "<CR>",
+					init_selection = "<C-space>",
+					node_incremental = "<C-space>",
 					node_decremental = "<BS>",
 					scope_incremental = "<TAB>",
 				},
@@ -434,6 +588,9 @@ require("lazy").setup({
 			local action_state = require("telescope.actions.state")
 			local builtin = require("telescope.builtin")
 			local fb_actions = require("telescope").extensions.file_browser.actions
+
+			-- Forward declaration (defined below, used by smart_find_files/smart_live_grep)
+			local directory_picker_for_mode
 
 			-- Cache fd command
 			local fd_command = vim.fn.executable("fd") == 1
@@ -573,7 +730,7 @@ require("lazy").setup({
 			end
 
 			-- Directory picker for mode switching
-			function directory_picker_for_mode(start_path)
+			directory_picker_for_mode = function(start_path)
 				telescope.extensions.file_browser.file_browser({
 					path = start_path,
 					cwd = start_path,
@@ -963,7 +1120,7 @@ require("lazy").setup({
 
 					-- Hover/help
 					vim.keymap.set("n", "K", vim.lsp.buf.hover, opts)
-					vim.keymap.set("n", "<C-k>", vim.lsp.buf.signature_help, opts)
+					vim.keymap.set("i", "<C-k>", vim.lsp.buf.signature_help, opts)
 
 					-- Code actions
 					vim.keymap.set("n", "<leader>ca", vim.lsp.buf.code_action, opts)

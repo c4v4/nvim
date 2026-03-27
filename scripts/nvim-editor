@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Used as $EDITOR/$VISUAL. Opens FILE in a floating window inside the running Neovim
+# instance ($NVIM) via _G._nvim_editor_open, then blocks until q/<Esc> signals done.
+# Falls back to a plain `nvim` if no Neovim socket is found (e.g. outside tmux/terminal).
+FILE="${1:-}"
+SOCKET="${NVIM:-}"
+
+if [ -z "$SOCKET" ] || [ -z "$FILE" ]; then
+    exec nvim ${FILE:+"$FILE"}
+fi
+
+# Create a sentinel path (file does not exist yet); Neovim writes it on close to unblock us.
+SENTINEL=$(mktemp /tmp/nvim-editor-done.XXXXXX)
+rm -f "$SENTINEL"
+
+nvim --server "$SOCKET" \
+    --remote-expr "execute('lua _G._nvim_editor_open([[${FILE}]], [[${SENTINEL}]])')" \
+    >/dev/null 2>&1
+
+# Poll for sentinel; also exit if the socket disappears (Neovim quit).
+while [ ! -f "$SENTINEL" ]; do
+    [ ! -e "$SOCKET" ] && break
+    sleep 0.05
+done
+
+rm -f "$SENTINEL"
