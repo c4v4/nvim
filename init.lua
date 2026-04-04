@@ -394,6 +394,18 @@ _G._nvim_editor_open = function(file, sentinel)
 
 	vim.keymap.set("n", "q", close, { buffer = bufnr, desc = "Send to Claude" })
 	vim.keymap.set("n", "<Esc>", close, { buffer = bufnr, desc = "Send to Claude" })
+
+	-- Position cursor at end of last line and enter insert mode so the user
+	-- can immediately continue typing where they left off.
+	-- feedkeys("A") is used instead of startinsert! because remote-expr
+	-- invocations suppress mode changes via vim.cmd.
+	vim.schedule(function()
+		vim.api.nvim_set_current_win(win)
+		local last_line = vim.api.nvim_buf_line_count(bufnr)
+		local last_col = #vim.api.nvim_buf_get_lines(bufnr, last_line - 1, last_line, false)[1]
+		vim.api.nvim_win_set_cursor(win, { last_line, last_col })
+		vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("A", true, false, true), "n", false)
+	end)
 end
 
 -- ============================================================================
