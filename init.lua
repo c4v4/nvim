@@ -64,6 +64,11 @@ vim.opt.wrap = true
 vim.opt.undofile = true  -- Persist undo history across sessions.
 vim.opt.swapfile = false
 vim.opt.backup = false
+-- Reload file from disk when changed externally. autoread alone is not enough:
+-- Neovim only acts on it when checktime is called. The autocmd below triggers
+-- checktime on FocusGained and BufEnter so refocusing the buffer or switching
+-- to it always picks up external changes before the user can overwrite them.
+vim.opt.autoread = true
 
 -- Performance
 -- updatetime drives CursorHold events. Since virtual_text is disabled, diagnostics
@@ -159,10 +164,10 @@ vim.keymap.set("t", "<C-k>", "<C-\\><C-n><C-w>k", { desc = "Go to upper window f
 vim.keymap.set("t", "<C-l>", "<C-\\><C-n><C-w>l", { desc = "Go to right window from terminal" })
 
 -- Window resizing
-vim.keymap.set("n", "<C-Up>", ":resize -2<CR>", { desc = "Decrease window height" })
-vim.keymap.set("n", "<C-Down>", ":resize +2<CR>", { desc = "Increase window height" })
-vim.keymap.set("n", "<C-Left>", ":vertical resize -2<CR>", { desc = "Decrease window width" })
-vim.keymap.set("n", "<C-Right>", ":vertical resize +2<CR>", { desc = "Increase window width" })
+vim.keymap.set("n", "<C-Up>", "<cmd>resize -2<CR>", { desc = "Decrease window height" })
+vim.keymap.set("n", "<C-Down>", "<cmd>resize +2<CR>", { desc = "Increase window height" })
+vim.keymap.set("n", "<C-Left>", "<cmd>vertical resize -2<CR>", { desc = "Decrease window width" })
+vim.keymap.set("n", "<C-Right>", "<cmd>vertical resize +2<CR>", { desc = "Increase window width" })
 
 -- Re-select the visual range after indenting so repeated < / > work without
 -- re-selecting manually.
@@ -184,19 +189,30 @@ vim.keymap.set({ "n", "x" }, "<leader>p", '"_dP', { desc = "Paste without yankin
 vim.keymap.set({ "n", "x" }, "<leader>d", '"_d', { desc = "Delete without yanking" })
 
 -- Clear search highlight (overrides the default no-op <Esc> in normal mode).
-vim.keymap.set("n", "<Esc>", ":nohlsearch<CR>", { desc = "Clear search highlight" })
+vim.keymap.set("n", "<Esc>", "<cmd>nohlsearch<CR>", { desc = "Clear search highlight" })
 
 -- Buffer switching
-vim.keymap.set("n", "<S-l>", ":bnext<CR>", { desc = "Next buffer" })
-vim.keymap.set("n", "<S-h>", ":bprevious<CR>", { desc = "Previous buffer" })
-vim.keymap.set("n", "<leader>x", ":bdelete!<CR>", { desc = "Close buffer" })
+vim.keymap.set("n", "<S-l>", "<cmd>bnext<CR>", { desc = "Next buffer" })
+vim.keymap.set("n", "<S-h>", "<cmd>bprevious<CR>", { desc = "Previous buffer" })
+vim.keymap.set("n", "<leader>x", "<cmd>bdelete!<CR>", { desc = "Close buffer" })
 
 -- ============================================================================
 -- AUTOCMDS
 --
 -- Global behaviors: auto-create directories on save, restore cursor position,
--- quickfix UX, terminal gf navigation, and diagnostic display configuration.
+-- quickfix UX, terminal gf navigation, external file reload, and diagnostic
+-- display configuration.
 -- ============================================================================
+
+-- Companion to autoread: trigger the on-disk check whenever Neovim gains focus
+-- or a buffer is entered, so external writes are picked up before a save can
+-- overwrite them. CmdlineLeave catches the case where the user runs a shell
+-- command via :! that modifies the file.
+vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter", "CmdlineLeave" }, {
+	callback = function()
+		vim.cmd("checktime")
+	end,
+})
 
 -- Auto-create parent directories when saving a new file in a non-existent path.
 -- Eliminates "No such file or directory" errors from :w.
@@ -481,12 +497,6 @@ local git_history_state = {
 -- nvim_buf_clear_namespace to efficiently remove all highlights on each update.
 local git_history_ns = vim.api.nvim_create_namespace("git_history_info")
 
-local function load_file_history()
-	local file = vim.fn.expand("%:p")
-	local output = vim.fn.systemlist("git log --format=%H -- " .. vim.fn.shellescape(file))
-	return output
-end
-
 local function update_info_win(commit_hash)
 	if not git_history_state.info_buf or not vim.api.nvim_buf_is_valid(git_history_state.info_buf) then
 		return
@@ -608,11 +618,6 @@ local function show_commit_diff(commit_hash)
 	vim.bo[git_history_state.diff_buf].filetype = orig_filetype
 	vim.bo[git_history_state.diff_buf].buftype = "nofile"
 
-	-- Disable folding in diff buffer
-	vim.api.nvim_set_current_win(git_history_state.diff_win)
-	vim.wo[git_history_state.diff_win].foldenable = false
-	vim.wo[git_history_state.diff_win].foldmethod = "manual"
-
 	-- Set cursor to same position
 	pcall(vim.api.nvim_win_set_cursor, git_history_state.diff_win, cursor_pos)
 
@@ -625,9 +630,7 @@ local function show_commit_diff(commit_hash)
 
 	-- Neovim automatically enables folding when diff mode is activated (foldmethod
 	-- becomes "diff"). Disable it immediately or diff context disappears inside folds.
-	vim.api.nvim_set_current_win(git_history_state.original_win)
 	vim.wo[git_history_state.original_win].foldenable = false
-	vim.api.nvim_set_current_win(git_history_state.diff_win)
 	vim.wo[git_history_state.diff_win].foldenable = false
 
 	-- Minimal winbars (full context is in info_win)
@@ -655,7 +658,8 @@ local function show_commit_diff(commit_hash)
 end
 
 vim.keymap.set("n", "<leader>gH", function()
-	git_history_state.commits = load_file_history()
+	local file = vim.fn.expand("%:p")
+	git_history_state.commits = vim.fn.systemlist("git log --format=%H -- " .. vim.fn.shellescape(file))
 	if #git_history_state.commits == 0 then
 		vim.notify("No git history for this file", vim.log.levels.WARN)
 		return
@@ -870,24 +874,16 @@ require("lazy").setup({
 					prompt_title = "📁" .. vim.fn.fnamemodify(path, ":~"),
 					attach_mappings = function(prompt_bufnr, map)
 						-- <C-b>: Open directory picker
-						map("i", "<C-b>", function()
+						local function open_dir_picker()
 							picker_state.mode = "find_files"
 							picker_state.original_cwd = path
 							actions.close(prompt_bufnr)
 							vim.schedule(function()
 								directory_picker_for_mode(path)
 							end)
-						end)
-
-						map("n", "<C-b>", function()
-							picker_state.mode = "find_files"
-							picker_state.original_cwd = path
-							actions.close(prompt_bufnr)
-							vim.schedule(function()
-								directory_picker_for_mode(path)
-							end)
-						end)
-
+						end
+						map("i", "<C-b>", open_dir_picker)
+						map("n", "<C-b>", open_dir_picker)
 						return true
 					end,
 				})
@@ -932,23 +928,16 @@ require("lazy").setup({
 					end,
 					attach_mappings = function(prompt_bufnr, map)
 						-- <C-b>: Open directory picker
-						map("i", "<C-b>", function()
+						local function open_dir_picker()
 							picker_state.mode = "live_grep"
 							picker_state.original_cwd = path
 							actions.close(prompt_bufnr)
 							vim.schedule(function()
 								directory_picker_for_mode(path)
 							end)
-						end)
-
-						map("n", "<C-b>", function()
-							picker_state.mode = "live_grep"
-							picker_state.original_cwd = path
-							actions.close(prompt_bufnr)
-							vim.schedule(function()
-								directory_picker_for_mode(path)
-							end)
-						end)
+						end
+						map("i", "<C-b>", open_dir_picker)
+						map("n", "<C-b>", open_dir_picker)
 
 						-- <C-f>: Add filters
 						map("i", "<C-f>", function()
