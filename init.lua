@@ -218,7 +218,7 @@ vim.keymap.set("n", "<Esc>", ":nohlsearch<CR>", { desc = "Clear search highlight
 -- Buffers
 vim.keymap.set("n", "<S-l>", ":bnext<CR>", { desc = "Next buffer" })
 vim.keymap.set("n", "<S-h>", ":bprevious<CR>", { desc = "Previous buffer" })
-vim.keymap.set("n", "<leader>x", ":bdelete<CR>", { desc = "Close buffer" })
+vim.keymap.set("n", "<leader>x", ":bdelete!<CR>", { desc = "Close buffer" })
 
 -- ============================================================================
 -- AUTOCMDS
@@ -339,7 +339,7 @@ local function update_claudecode_diff_winbars()
 		for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
 			if vim.api.nvim_win_is_valid(win) then
 				local wb = get_winbar(win)
-				if wb and (wb:match("^%[PROPOSED%]") or wb:match("^%[ORIGINAL%]")) then
+				if wb and (wb:match("^%[ PROPOSED %]") or wb:match("^%[ ORIGINAL %]")) then
 					pcall(vim.api.nvim_set_option_value, "winbar", "", { win = win })
 				end
 			end
@@ -350,7 +350,7 @@ local function update_claudecode_diff_winbars()
 	-- Set winbar on proposed windows
 	for _, info in ipairs(proposed_wins) do
 		local rel = vim.fn.fnamemodify(info.tab_name, ":~:.")
-		pcall(vim.api.nvim_set_option_value, "winbar", "[PROPOSED] " .. rel, { win = info.win })
+		pcall(vim.api.nvim_set_option_value, "winbar", "[ PROPOSED ]  " .. rel, { win = info.win })
 	end
 
 	-- Set winbar on original windows (diff mode on, no claudecode marker)
@@ -362,7 +362,7 @@ local function update_claudecode_diff_winbars()
 		if not vim.b[buf].claudecode_diff_tab_name and vim.wo[win].diff then
 			local path = vim.api.nvim_buf_get_name(buf)
 			local rel = path ~= "" and vim.fn.fnamemodify(path, ":~:.") or "[No Name]"
-			pcall(vim.api.nvim_set_option_value, "winbar", "[ORIGINAL] " .. rel, { win = win })
+			pcall(vim.api.nvim_set_option_value, "winbar", "[ ORIGINAL ]  " .. rel, { win = win })
 		end
 		::continue::
 	end
@@ -392,12 +392,90 @@ local git_history_state = {
 	original_win = nil,
 	diff_buf = nil,
 	diff_win = nil,
+	info_buf = nil,
+	info_win = nil,
 }
+local git_history_ns = vim.api.nvim_create_namespace("git_history_info")
 
 local function load_file_history()
 	local file = vim.fn.expand("%:p")
 	local output = vim.fn.systemlist("git log --format=%H -- " .. vim.fn.shellescape(file))
 	return output
+end
+
+local function update_info_win(commit_hash)
+	if not git_history_state.info_buf
+	   or not vim.api.nvim_buf_is_valid(git_history_state.info_buf) then
+		return
+	end
+
+	local raw = vim.fn.system(
+		'git show --no-patch --format="%h%x01%s%x01%an%x01%ar%x01%b" ' .. commit_hash
+	)
+	local parts = vim.split(raw, "\1", { plain = true })
+	local hash    = vim.trim(parts[1] or "")
+	local subject = vim.trim(parts[2] or "")
+	local author  = vim.trim(parts[3] or "")
+	local date    = vim.trim(parts[4] or "")
+	local body    = parts[5] or ""
+
+	local idx   = git_history_state.index
+	local total = #git_history_state.commits
+
+	local lines = {
+		string.format(
+			"  Git History [ %d / %d ]     [g older   ]g newer   <leader>gq close",
+			idx, total
+		),
+		string.format("  %s  %s  --  %s", hash, author, date),
+		string.format("  %s", subject),
+	}
+	for _, bl in ipairs(vim.split(body, "\n", { plain = true })) do
+		table.insert(lines, "  " .. bl)
+	end
+
+	local buf = git_history_state.info_buf
+	vim.bo[buf].modifiable = true
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	vim.bo[buf].modifiable = false
+
+	-- Apply highlights
+	vim.api.nvim_buf_clear_namespace(buf, git_history_ns, 0, -1)
+
+	-- Line 0: "  Git History [ N / M ]     [g older   ]g newer   <leader>gq close"
+	local l0 = lines[1]
+	local ht_s, ht_e = l0:find("Git History")
+	if ht_s then
+		vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Title", 0, ht_s - 1, ht_e)
+	end
+	local cnt_s, cnt_e = l0:find("%[%s*%d[^%]]*%]")
+	if cnt_s then
+		vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Number", 0, cnt_s - 1, cnt_e)
+	end
+	for _, pat in ipairs({ "%[g older", "%]g newer", "<leader>gq close" }) do
+		local ps, pe = l0:find(pat)
+		if ps then
+			vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Keyword", 0, ps - 1, pe)
+		end
+	end
+
+	-- Line 1: "  hash  author  --  date"
+	if #hash > 0 then
+		vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Constant", 1, 2, 2 + #hash)
+	end
+	local author_start = 2 + #hash + 2
+	if #author > 0 then
+		vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Identifier", 1, author_start, author_start + #author)
+	end
+	local sep_s = lines[2]:find("  %-%-  ")
+	if sep_s then
+		vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Comment", 1, sep_s - 1, -1)
+	end
+
+	-- Line 2: subject
+	if #subject > 0 then
+		vim.api.nvim_buf_add_highlight(buf, git_history_ns, "String", 2, 2, -1)
+	end
 end
 
 local function show_commit_diff(commit_hash)
@@ -406,11 +484,35 @@ local function show_commit_diff(commit_hash)
 		"git show " .. commit_hash .. ":" .. vim.fn.shellescape(file:gsub(vim.fn.getcwd() .. "/", ""))
 	)
 
-	-- Save cursor position from original window
+	-- Capture filetype and cursor from original window before any window switching
+	local orig_filetype = vim.bo[vim.api.nvim_win_get_buf(git_history_state.original_win)].filetype
 	local cursor_pos = vim.api.nvim_win_get_cursor(git_history_state.original_win)
 
-	-- Create or reuse diff buffer
-	if not git_history_state.diff_buf or not vim.api.nvim_buf_is_valid(git_history_state.diff_buf) then
+	-- Create or reuse windows
+	if not git_history_state.diff_buf
+	   or not vim.api.nvim_buf_is_valid(git_history_state.diff_buf)
+	   or not git_history_state.info_buf
+	   or not vim.api.nvim_buf_is_valid(git_history_state.info_buf) then
+
+		-- Create info window at top of tabpage (full width)
+		vim.api.nvim_set_current_win(git_history_state.original_win)
+		vim.cmd("topleft split")
+		git_history_state.info_win = vim.api.nvim_get_current_win()
+		git_history_state.info_buf = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_win_set_buf(git_history_state.info_win, git_history_state.info_buf)
+		vim.api.nvim_win_set_height(git_history_state.info_win, 4)
+		vim.wo[git_history_state.info_win].winfixheight = true
+		vim.wo[git_history_state.info_win].number = false
+		vim.wo[git_history_state.info_win].relativenumber = false
+		vim.wo[git_history_state.info_win].signcolumn = "no"
+		vim.wo[git_history_state.info_win].statusline = " "
+		vim.wo[git_history_state.info_win].wrap = false
+		vim.wo[git_history_state.info_win].foldenable = false
+		vim.bo[git_history_state.info_buf].buftype = "nofile"
+		vim.bo[git_history_state.info_buf].modifiable = false
+
+		-- Create diff window (vsplit from original)
+		vim.api.nvim_set_current_win(git_history_state.original_win)
 		vim.cmd("vsplit")
 		git_history_state.diff_win = vim.api.nvim_get_current_win()
 		git_history_state.diff_buf = vim.api.nvim_create_buf(false, true)
@@ -419,7 +521,7 @@ local function show_commit_diff(commit_hash)
 
 	-- Load commit content
 	vim.api.nvim_buf_set_lines(git_history_state.diff_buf, 0, -1, false, content)
-	vim.bo[git_history_state.diff_buf].filetype = vim.bo.filetype
+	vim.bo[git_history_state.diff_buf].filetype = orig_filetype
 	vim.bo[git_history_state.diff_buf].buftype = "nofile"
 
 	-- Disable folding in diff buffer
@@ -430,8 +532,11 @@ local function show_commit_diff(commit_hash)
 	-- Set cursor to same position
 	pcall(vim.api.nvim_win_set_cursor, git_history_state.diff_win, cursor_pos)
 
-	-- Enable diff mode
-	vim.cmd("windo diffthis")
+	-- Enable diff mode (targeted -- avoids enabling diff on info_win)
+	vim.api.nvim_set_current_win(git_history_state.original_win)
+	vim.cmd("diffthis")
+	vim.api.nvim_set_current_win(git_history_state.diff_win)
+	vim.cmd("diffthis")
 
 	-- Disable folding in both windows after diff is enabled
 	vim.api.nvim_set_current_win(git_history_state.original_win)
@@ -439,9 +544,19 @@ local function show_commit_diff(commit_hash)
 	vim.api.nvim_set_current_win(git_history_state.diff_win)
 	vim.wo[git_history_state.diff_win].foldenable = false
 
-	-- Show commit info
-	local commit_info = vim.fn.systemlist('git show --no-patch --format="%h %s (%ar)" ' .. commit_hash)[1]
-	vim.notify("Showing: " .. commit_info, vim.log.levels.INFO)
+	-- Minimal winbars (full context is in info_win)
+	local idx   = git_history_state.index
+	local total = #git_history_state.commits
+	pcall(vim.api.nvim_set_option_value, "winbar",
+		string.format("%%#Comment#[ %d / %d ]%%*", idx, total),
+		{ win = git_history_state.diff_win })
+	local file_name = vim.fn.fnamemodify(file, ":~:.")
+	pcall(vim.api.nvim_set_option_value, "winbar",
+		"[ CURRENT ]  " .. file_name,
+		{ win = git_history_state.original_win })
+
+	-- Update info window content
+	update_info_win(commit_hash)
 
 	-- Return to original window
 	vim.api.nvim_set_current_win(git_history_state.original_win)
@@ -478,11 +593,30 @@ vim.keymap.set("n", "]g", function()
 end, { desc = "Newer commit" })
 
 vim.keymap.set("n", "<leader>gq", function()
+	if git_history_state.original_win and vim.api.nvim_win_is_valid(git_history_state.original_win) then
+		vim.api.nvim_set_current_win(git_history_state.original_win)
+		vim.cmd("diffoff")
+		pcall(vim.api.nvim_set_option_value, "winbar", "", { win = git_history_state.original_win })
+	end
 	if git_history_state.diff_win and vim.api.nvim_win_is_valid(git_history_state.diff_win) then
-		vim.cmd("diffoff!")
+		vim.api.nvim_set_current_win(git_history_state.diff_win)
+		vim.cmd("diffoff")
 		vim.api.nvim_win_close(git_history_state.diff_win, true)
 	end
-	git_history_state = { commits = {}, index = 0, original_win = nil, diff_buf = nil, diff_win = nil }
+	if git_history_state.info_win and vim.api.nvim_win_is_valid(git_history_state.info_win) then
+		vim.api.nvim_win_close(git_history_state.info_win, true)
+	end
+	if git_history_state.info_buf and vim.api.nvim_buf_is_valid(git_history_state.info_buf) then
+		vim.api.nvim_buf_delete(git_history_state.info_buf, { force = true })
+	end
+	if git_history_state.original_win and vim.api.nvim_win_is_valid(git_history_state.original_win) then
+		vim.api.nvim_set_current_win(git_history_state.original_win)
+	end
+	git_history_state = {
+		commits = {}, index = 0,
+		original_win = nil, diff_buf = nil, diff_win = nil,
+		info_buf = nil, info_win = nil,
+	}
 end, { desc = "Close git history" })
 
 -- ============================================================================
