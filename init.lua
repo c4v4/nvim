@@ -8,88 +8,6 @@ vim.g.maplocalleader = " "
 vim.g.loaded_netrw = 1
 vim.g.loaded_netrwPlugin = 1
 
--- Make $EDITOR open files in this Neovim instance (e.g. Claude Code's "open in editor" shortcut).
--- scripts/nvim-editor uses --remote-expr to call _nvim_editor_open, which opens the file in a
--- centered floating window. q/<Esc> saves and closes the float; the script unblocks via sentinel.
-local _editor_script = vim.fn.stdpath("config") .. "/scripts/nvim-editor"
-if vim.fn.executable(_editor_script) == 1 then
-	vim.env.EDITOR = _editor_script
-	vim.env.VISUAL = _editor_script
-end
-
--- Called by scripts/nvim-editor. Opens the file in a centered floating window so the
--- existing layout is untouched. q/<Esc> writes the buffer to disk and signals the sentinel,
--- unblocking the shell script so Claude Code reads the result.
-_G._nvim_editor_open = function(file, sentinel)
-	local abs_file = vim.fn.fnamemodify(file, ":p")
-
-	-- Load the buffer without touching any existing window.
-	-- buftype=nofile: excludes it from auto-save (prevents premature file writes
-	-- that could confuse Claude Code's file watcher before the user is done).
-	local bufnr = vim.fn.bufadd(abs_file)
-	vim.fn.bufload(bufnr)
-	vim.bo[bufnr].buftype = "nofile"
-
-	-- Float dimensions: 80% wide, 70% tall, centered
-	local width = math.floor(vim.o.columns * 0.8)
-	local height = math.floor(vim.o.lines * 0.7)
-	local row = math.floor((vim.o.lines - height) / 2)
-	local col = math.floor((vim.o.columns - width) / 2)
-
-	local win = vim.api.nvim_open_win(bufnr, true, {
-		relative = "editor",
-		width = width,
-		height = height,
-		row = row,
-		col = col,
-		style = "minimal",
-		border = "rounded",
-		title = " Claude Prompt -- q/<Esc> to send ",
-		title_pos = "center",
-	})
-
-	-- Disable nvim-cmp in this buffer (completions are irrelevant here and
-	-- confirming one was triggering Claude Code's file-watcher prematurely)
-	local cmp_ok, cmp = pcall(require, "cmp")
-	if cmp_ok then
-		cmp.setup.buffer({ enabled = false })
-	end
-
-	-- Define sentinel helpers before any autocmd references them
-	local sentinel_written = false
-	local function write_sentinel()
-		if not sentinel_written then
-			sentinel_written = true
-			vim.fn.writefile({}, sentinel)
-		end
-	end
-
-	-- Fallback: if buffer is deleted externally (e.g. :bwipeout from cmdline), write sentinel
-	vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
-		buffer = bufnr,
-		once = true,
-		callback = write_sentinel,
-	})
-
-	local function close()
-		-- Write buffer content directly to disk -- bypass :write and modified-flag checks
-		if vim.api.nvim_buf_is_valid(bufnr) then
-			local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-			vim.fn.writefile(lines, abs_file)
-		end
-		write_sentinel()
-		if vim.api.nvim_win_is_valid(win) then
-			vim.api.nvim_win_close(win, true)
-		end
-		if vim.api.nvim_buf_is_valid(bufnr) then
-			pcall(vim.cmd, "bdelete! " .. bufnr)
-		end
-	end
-
-	vim.keymap.set("n", "q", close, { buffer = bufnr, desc = "Send to Claude" })
-	vim.keymap.set("n", "<Esc>", close, { buffer = bufnr, desc = "Send to Claude" })
-end
-
 -- UI
 vim.opt.number = true
 vim.opt.relativenumber = true
@@ -310,6 +228,90 @@ vim.api.nvim_create_autocmd("CursorHold", {
 })
 
 -- ============================================================================
+-- CLAUDE CODE EDITOR INTEGRATION
+-- Sets $EDITOR/$VISUAL to scripts/nvim-editor so Claude Code's "open in editor"
+-- shortcut opens files inside the running Neovim instance rather than spawning
+-- a new one. The script calls _nvim_editor_open via --remote-expr, which opens
+-- the file in a centered floating window without disturbing the current layout.
+-- q/<Esc> writes the buffer to disk and signals the sentinel file, unblocking
+-- the shell script so Claude Code reads the result.
+-- ============================================================================
+
+local _editor_script = vim.fn.stdpath("config") .. "/scripts/nvim-editor"
+if vim.fn.executable(_editor_script) == 1 then
+	vim.env.EDITOR = _editor_script
+	vim.env.VISUAL = _editor_script
+end
+
+_G._nvim_editor_open = function(file, sentinel)
+	local abs_file = vim.fn.fnamemodify(file, ":p")
+
+	-- Load the buffer without touching any existing window.
+	-- buftype=nofile prevents premature writes that could confuse Claude Code's
+	-- file watcher before the user finishes editing.
+	local bufnr = vim.fn.bufadd(abs_file)
+	vim.fn.bufload(bufnr)
+	vim.bo[bufnr].buftype = "nofile"
+
+	-- Float dimensions: 80% wide, 70% tall, centered
+	local width = math.floor(vim.o.columns * 0.8)
+	local height = math.floor(vim.o.lines * 0.7)
+	local row = math.floor((vim.o.lines - height) / 2)
+	local col = math.floor((vim.o.columns - width) / 2)
+
+	local win = vim.api.nvim_open_win(bufnr, true, {
+		relative = "editor",
+		width = width,
+		height = height,
+		row = row,
+		col = col,
+		style = "minimal",
+		border = "rounded",
+		title = " Claude Prompt -- q/<Esc> to send ",
+		title_pos = "center",
+	})
+
+	-- Disable nvim-cmp in this buffer (completions are irrelevant and confirming
+	-- a completion was triggering Claude Code's file-watcher prematurely)
+	local cmp_ok, cmp = pcall(require, "cmp")
+	if cmp_ok then
+		cmp.setup.buffer({ enabled = false })
+	end
+
+	local sentinel_written = false
+	local function write_sentinel()
+		if not sentinel_written then
+			sentinel_written = true
+			vim.fn.writefile({}, sentinel)
+		end
+	end
+
+	-- Fallback: if the buffer is wiped externally (e.g. :bwipeout), still signal
+	vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
+		buffer = bufnr,
+		once = true,
+		callback = write_sentinel,
+	})
+
+	local function close()
+		if vim.api.nvim_buf_is_valid(bufnr) then
+			local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+			vim.fn.writefile(lines, abs_file)
+		end
+		write_sentinel()
+		if vim.api.nvim_win_is_valid(win) then
+			vim.api.nvim_win_close(win, true)
+		end
+		if vim.api.nvim_buf_is_valid(bufnr) then
+			pcall(vim.cmd, "bdelete! " .. bufnr)
+		end
+	end
+
+	vim.keymap.set("n", "q", close, { buffer = bufnr, desc = "Send to Claude" })
+	vim.keymap.set("n", "<Esc>", close, { buffer = bufnr, desc = "Send to Claude" })
+end
+
+-- ============================================================================
 -- CLAUDE CODE DIFF VIEW WINBAR
 -- ============================================================================
 
@@ -404,29 +406,23 @@ local function load_file_history()
 end
 
 local function update_info_win(commit_hash)
-	if not git_history_state.info_buf
-	   or not vim.api.nvim_buf_is_valid(git_history_state.info_buf) then
+	if not git_history_state.info_buf or not vim.api.nvim_buf_is_valid(git_history_state.info_buf) then
 		return
 	end
 
-	local raw = vim.fn.system(
-		'git show --no-patch --format="%h%x01%s%x01%an%x01%ar%x01%b" ' .. commit_hash
-	)
+	local raw = vim.fn.system('git show --no-patch --format="%h%x01%s%x01%an%x01%ar%x01%b" ' .. commit_hash)
 	local parts = vim.split(raw, "\1", { plain = true })
-	local hash    = vim.trim(parts[1] or "")
+	local hash = vim.trim(parts[1] or "")
 	local subject = vim.trim(parts[2] or "")
-	local author  = vim.trim(parts[3] or "")
-	local date    = vim.trim(parts[4] or "")
-	local body    = parts[5] or ""
+	local author = vim.trim(parts[3] or "")
+	local date = vim.trim(parts[4] or "")
+	local body = parts[5] or ""
 
-	local idx   = git_history_state.index
+	local idx = git_history_state.index
 	local total = #git_history_state.commits
 
 	local lines = {
-		string.format(
-			"  Git History [ %d / %d ]     [g older   ]g newer   <leader>gq close",
-			idx, total
-		),
+		string.format("  Git History [ %d / %d ]     [g older   ]g newer   <leader>gq close", idx, total),
 		string.format("  %s  %s  --  %s", hash, author, date),
 		string.format("  %s", subject),
 	}
@@ -489,11 +485,12 @@ local function show_commit_diff(commit_hash)
 	local cursor_pos = vim.api.nvim_win_get_cursor(git_history_state.original_win)
 
 	-- Create or reuse windows
-	if not git_history_state.diff_buf
-	   or not vim.api.nvim_buf_is_valid(git_history_state.diff_buf)
-	   or not git_history_state.info_buf
-	   or not vim.api.nvim_buf_is_valid(git_history_state.info_buf) then
-
+	if
+		not git_history_state.diff_buf
+		or not vim.api.nvim_buf_is_valid(git_history_state.diff_buf)
+		or not git_history_state.info_buf
+		or not vim.api.nvim_buf_is_valid(git_history_state.info_buf)
+	then
 		-- Create info window at top of tabpage (full width)
 		vim.api.nvim_set_current_win(git_history_state.original_win)
 		vim.cmd("topleft split")
@@ -545,15 +542,21 @@ local function show_commit_diff(commit_hash)
 	vim.wo[git_history_state.diff_win].foldenable = false
 
 	-- Minimal winbars (full context is in info_win)
-	local idx   = git_history_state.index
+	local idx = git_history_state.index
 	local total = #git_history_state.commits
-	pcall(vim.api.nvim_set_option_value, "winbar",
+	pcall(
+		vim.api.nvim_set_option_value,
+		"winbar",
 		string.format("%%#Comment#[ %d / %d ]%%*", idx, total),
-		{ win = git_history_state.diff_win })
+		{ win = git_history_state.diff_win }
+	)
 	local file_name = vim.fn.fnamemodify(file, ":~:.")
-	pcall(vim.api.nvim_set_option_value, "winbar",
+	pcall(
+		vim.api.nvim_set_option_value,
+		"winbar",
 		"[ CURRENT ]  " .. file_name,
-		{ win = git_history_state.original_win })
+		{ win = git_history_state.original_win }
+	)
 
 	-- Update info window content
 	update_info_win(commit_hash)
@@ -613,9 +616,13 @@ vim.keymap.set("n", "<leader>gq", function()
 		vim.api.nvim_set_current_win(git_history_state.original_win)
 	end
 	git_history_state = {
-		commits = {}, index = 0,
-		original_win = nil, diff_buf = nil, diff_win = nil,
-		info_buf = nil, info_win = nil,
+		commits = {},
+		index = 0,
+		original_win = nil,
+		diff_buf = nil,
+		diff_win = nil,
+		info_buf = nil,
+		info_win = nil,
 	}
 end, { desc = "Close git history" })
 
