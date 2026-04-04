@@ -116,7 +116,7 @@ vim.opt.expandtab = true
 vim.opt.smartindent = true
 
 -- Editing
-vim.opt.wrap = false
+vim.opt.wrap = true
 vim.opt.undofile = true
 vim.opt.swapfile = false
 vim.opt.backup = false
@@ -355,7 +355,9 @@ local function update_claudecode_diff_winbars()
 
 	-- Set winbar on original windows (diff mode on, no claudecode marker)
 	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-		if not vim.api.nvim_win_is_valid(win) then goto continue end
+		if not vim.api.nvim_win_is_valid(win) then
+			goto continue
+		end
 		local buf = vim.api.nvim_win_get_buf(win)
 		if not vim.b[buf].claudecode_diff_tab_name and vim.wo[win].diff then
 			local path = vim.api.nvim_buf_get_name(buf)
@@ -531,11 +533,19 @@ require("lazy").setup({
 	},
 
 	-- Treesitter (syntax highlighting, smart selection)
+	-- main branch (0.12+): setup() only accepts install_dir.
+	-- Highlighting is native Neovim (vim.treesitter.start via FileType autocmd).
+	-- Indent uses nvim-treesitter's indentexpr per-buffer.
+	-- Parsers are installed explicitly via require('nvim-treesitter').install{}.
 	{
 		"nvim-treesitter/nvim-treesitter",
-		build = ":TSUpdate",
-		opts = {
-			ensure_installed = {
+		branch = "main",
+		lazy = false, -- plugin does not support lazy-loading
+		-- No build step: parsers are installed in config via require('nvim-treesitter').install{}.
+		-- Run :TSUpdate manually after plugin updates to refresh parsers.
+		config = function()
+			-- Install parsers for languages we care about
+			require("nvim-treesitter").install({
 				"c",
 				"cpp",
 				"python",
@@ -548,32 +558,25 @@ require("lazy").setup({
 				"make",
 				"markdown",
 				"markdown_inline",
-			},
-			auto_install = true,
-			highlight = {
-				enable = true,
-				additional_vim_regex_highlighting = false,
-			},
-			indent = { enable = true },
-			incremental_selection = {
-				enable = true,
-				keymaps = {
-					init_selection = "<C-space>",
-					node_incremental = "<C-space>",
-					node_decremental = "<BS>",
-					scope_incremental = "<TAB>",
-				},
-			},
-		},
-		config = function(_, opts)
-			require("nvim-treesitter.configs").setup(opts)
+			})
+
+			-- Enable treesitter highlighting and indentation for all filetypes
+			-- where a parser is available.
+			vim.api.nvim_create_autocmd("FileType", {
+				group = vim.api.nvim_create_augroup("ts_highlight", { clear = true }),
+				callback = function(ev)
+					if pcall(vim.treesitter.start, ev.buf) then
+						vim.bo[ev.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+					end
+				end,
+			})
 		end,
 	},
 
 	-- Fuzzy Finder
 	{
 		"nvim-telescope/telescope.nvim",
-		branch = "0.1.x",
+		branch = "master", -- 0.1.x dropped; master has Neovim 0.12 treesitter fixes
 		dependencies = {
 			"nvim-lua/plenary.nvim",
 			{
@@ -738,7 +741,8 @@ require("lazy").setup({
 					hidden = true,
 					grouped = true,
 					depth = 1, -- Don't recurse into subdirectories
-					prompt_title = "📂 Select Directory (<C-b> to confirm)",
+					prompt_title = "📁" .. vim.fn.fnamemodify(start_path, ":~"),
+					results_title = "Setting CWD to: " .. vim.fn.fnamemodify(vim.fn.getcwd(), ":~"),
 					attach_mappings = function(prompt_bufnr, map)
 						-- <C-b>: Select current directory and return to previous mode
 						local function select_and_return()
@@ -771,6 +775,8 @@ require("lazy").setup({
 								local path = entry.Path:absolute()
 								if vim.fn.isdirectory(path) == 1 then
 									fb_actions.change_cwd(pb)
+									local picker = action_state.get_current_picker(pb)
+									picker.results_border:change_title("cwd: " .. vim.fn.fnamemodify(path, ":~"))
 								else
 									actions.close(pb)
 									vim.cmd("edit " .. vim.fn.fnameescape(path))
@@ -812,7 +818,7 @@ require("lazy").setup({
 						},
 					},
 					path_display = { shorten = { len = 3, exclude = { -1, -2, -3 } } },
-				dynamic_preview_title = true,
+					dynamic_preview_title = true,
 					file_ignore_patterns = {
 						"%.git/",
 						"node_modules/",
@@ -854,7 +860,13 @@ require("lazy").setup({
 			pcall(telescope.load_extension, "file_browser")
 
 			-- PRIMARY KEYMAPS
-			vim.keymap.set("n", "<C-p>", smart_find_files, { desc = "Find files" })
+			vim.keymap.set("n", "<C-p>", function()
+				local ctx = get_buffer_context()
+				local start_path = ctx.is_real_file and ctx.dir or get_smart_cwd()
+				picker_state.mode = "find_files"
+				picker_state.original_cwd = start_path
+				directory_picker_for_mode(start_path)
+			end, { desc = "Find files" })
 
 			-- SEARCH NAMESPACE (leader-s)
 			vim.keymap.set("n", "<leader>sr", builtin.resume, { desc = "Resume search" })
