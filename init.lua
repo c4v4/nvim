@@ -1,33 +1,59 @@
 -- ============================================================================
+-- init.lua -- Neovim configuration
+--
+-- Single-file setup (no lua/ subdirectory). Plugins are managed by lazy.nvim.
+--
+-- Sections (in order):
+--   BASIC SETTINGS              core editor options and UI
+--   CONTEXT RESOLVER            buffer-centric working directory helpers
+--   KEY MAPPINGS                global keymaps (not plugin-specific)
+--   AUTOCMDS                    global autocommands and diagnostic config
+--   CLAUDE CODE EDITOR INTEGRATION   $EDITOR float for Claude Code prompts
+--   CLAUDE CODE DIFF VIEW WINBAR     winbar labels for Claude Code diffs
+--   FILE GIT HISTORY NAVIGATOR  3-window git blame/diff browser
+--   PLUGIN MANAGER              lazy.nvim bootstrap
+--   PLUGINS                     plugin specs and their configs/keymaps
+-- ============================================================================
+
+-- ============================================================================
 -- BASIC SETTINGS
+--
+-- Core editor options: UI, splits, search, indentation, editing behavior, and
+-- persistence. All settings below deviate from Neovim defaults unless noted.
 -- ============================================================================
 vim.g.mapleader = " "
 vim.g.maplocalleader = " "
 
--- Disable netrw (conflicts with fugitive)
+-- Disabled because vim-fugitive (and telescope-file-browser) handle directory
+-- browsing. Netrw and fugitive conflict when opening directories.
 vim.g.loaded_netrw = 1
 vim.g.loaded_netrwPlugin = 1
 
 -- UI
 vim.opt.number = true
 vim.opt.relativenumber = true
-vim.opt.signcolumn = "yes"
+vim.opt.signcolumn = "yes"       -- Always show to avoid layout shifts when diagnostics/git signs appear.
 vim.opt.cursorline = true
 vim.opt.termguicolors = true
-vim.opt.scrolloff = 8
-vim.opt.sidescrolloff = 8
+vim.opt.scrolloff = 8            -- Keep 8 lines of context visible above/below the cursor.
+vim.opt.sidescrolloff = 8        -- Keep 8 columns of context visible left/right of the cursor.
 
 -- Splits
+-- New vertical splits open to the right; horizontal splits open below.
+-- More natural than Vim's default (left/above).
 vim.opt.splitright = true
 vim.opt.splitbelow = true
 
 -- Search
+-- ignorecase: searches are case-insensitive by default.
+-- smartcase: override -- if the pattern contains any uppercase, match exactly.
+-- Together: /foo matches Foo, but /Foo matches only Foo.
 vim.opt.ignorecase = true
 vim.opt.smartcase = true
 vim.opt.hlsearch = true
 vim.opt.incsearch = true
 
--- Indentation
+-- Indentation (4-space, expand tabs to spaces)
 vim.opt.tabstop = 4
 vim.opt.shiftwidth = 4
 vim.opt.expandtab = true
@@ -35,32 +61,50 @@ vim.opt.smartindent = true
 
 -- Editing
 vim.opt.wrap = true
-vim.opt.undofile = true
+vim.opt.undofile = true  -- Persist undo history across sessions.
 vim.opt.swapfile = false
 vim.opt.backup = false
 
 -- Performance
+-- updatetime drives CursorHold events. Since virtual_text is disabled, diagnostics
+-- appear via a CursorHold autocmd -- lower value = faster popup response.
 vim.opt.updatetime = 250
+-- How long to wait for a key sequence to complete. Also drives which-key delay.
 vim.opt.timeoutlen = 300
 
--- Enhanced ShaDa for persistent history
+-- ShaDa (persistent state across sessions):
+--   "!":   persist global variables (used by plugins that store state in vim.g)
+--   '1000: remember marks for up to 1000 files
+--   <50:   save at most 50 lines per register entry
+--   s10:   skip registers whose content exceeds 10 KB
+--   h:     do not restore hlsearch state on startup
 vim.opt.shada = { "!", "'1000", "<50", "s10", "h" }
+
+-- Sync yank/delete/paste with the system clipboard by default.
+-- See also <leader>p and <leader>d for paste/delete without touching the clipboard.
 vim.opt.clipboard = "unnamedplus"
 
--- Spell checking
+-- Spell checking on by default. Disabled per-buffer in terminal windows (see AUTOCMDS).
 vim.opt.spell = true
 vim.opt.spelllang = { "en_us" }
 
 -- ============================================================================
--- CONTEXT RESOLVER (Core of Buffer-Centric Philosophy)
+-- CONTEXT RESOLVER
+--
+-- All directory-sensitive operations (Telescope, terminal, git commands) use
+-- get_smart_cwd() rather than vim.fn.getcwd(). This keeps the global working
+-- directory stable -- changing it would break plugins that rely on it -- while
+-- still rooting searches/terminals in the current project.
 -- ============================================================================
 
--- Returns context for current buffer, falling back to last real buffer if in special buffer
--- (terminal, quickfix, etc). Returns git root if available, otherwise buffer directory.
+-- Returns path, dir, git_root, and is_real_file for the current editing context,
+-- falling back to the last real file buffer when in a special buffer.
 local function get_buffer_context()
 	local bufnr = vim.api.nvim_get_current_buf()
 
-	-- Fallback to last real buffer if in special buffer
+	-- Special buffers (terminal, quickfix, help, etc.) have no meaningful path.
+	-- Walk the buffer list and use the first real file buffer instead so that
+	-- opening a terminal does not lose the project context.
 	if vim.bo[bufnr].buftype ~= "" then
 		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 			if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == "" then
@@ -93,56 +137,69 @@ end
 
 -- ============================================================================
 -- KEY MAPPINGS
+--
+-- Window navigation, resizing, visual-mode indenting, cursor centering,
+-- clipboard-safe paste/delete, search highlight clearing, and buffer switching.
+-- Plugin-specific keymaps are defined in each plugin's config block (PLUGINS).
 -- ============================================================================
 
--- Better window navigation
+-- Window navigation (normal mode)
 vim.keymap.set("n", "<C-h>", "<C-w>h", { desc = "Go to left window" })
 vim.keymap.set("n", "<C-j>", "<C-w>j", { desc = "Go to lower window" })
 vim.keymap.set("n", "<C-k>", "<C-w>k", { desc = "Go to upper window" })
 vim.keymap.set("n", "<C-l>", "<C-w>l", { desc = "Go to right window" })
 
--- Terminal mode mappings
+-- Terminal mode: exit + window navigation
+-- Double-Esc exits terminal mode. Single <Esc> is left alone so programs
+-- running in the terminal (e.g. vim, fzf) can receive it.
 vim.keymap.set("t", "<Esc><Esc>", "<C-\\><C-n>", { desc = "Exit terminal mode" })
 vim.keymap.set("t", "<C-h>", "<C-\\><C-n><C-w>h", { desc = "Go to left window from terminal" })
 vim.keymap.set("t", "<C-j>", "<C-\\><C-n><C-w>j", { desc = "Go to lower window from terminal" })
 vim.keymap.set("t", "<C-k>", "<C-\\><C-n><C-w>k", { desc = "Go to upper window from terminal" })
 vim.keymap.set("t", "<C-l>", "<C-\\><C-n><C-w>l", { desc = "Go to right window from terminal" })
 
--- Resize windows
+-- Window resizing
 vim.keymap.set("n", "<C-Up>", ":resize -2<CR>", { desc = "Decrease window height" })
 vim.keymap.set("n", "<C-Down>", ":resize +2<CR>", { desc = "Increase window height" })
 vim.keymap.set("n", "<C-Left>", ":vertical resize -2<CR>", { desc = "Decrease window width" })
 vim.keymap.set("n", "<C-Right>", ":vertical resize +2<CR>", { desc = "Increase window width" })
 
--- Better indenting
+-- Re-select the visual range after indenting so repeated < / > work without
+-- re-selecting manually.
 vim.keymap.set("v", "<", "<gv")
 vim.keymap.set("v", ">", ">gv")
 
--- Keep cursor centered
+-- Page up/down with cursor centered. zz re-centers; zv opens any fold the
+-- cursor lands inside.
 vim.keymap.set("n", "<C-d>", "<C-d>zz")
 vim.keymap.set("n", "<C-u>", "<C-u>zz")
 vim.keymap.set("n", "n", "nzzzv")
 vim.keymap.set("n", "N", "Nzzzv")
 
--- Paste without yanking
+-- Paste using the black-hole register ("_) so the clipboard is not overwritten.
+-- Allows the same yanked text to be pasted repeatedly.
 vim.keymap.set({ "n", "x" }, "<leader>p", '"_dP', { desc = "Paste without yanking" })
 
--- Delete without yanking
+-- Delete to the black-hole register -- clipboard is unaffected.
 vim.keymap.set({ "n", "x" }, "<leader>d", '"_d', { desc = "Delete without yanking" })
 
--- Clear search highlight
+-- Clear search highlight (overrides the default no-op <Esc> in normal mode).
 vim.keymap.set("n", "<Esc>", ":nohlsearch<CR>", { desc = "Clear search highlight" })
 
--- Buffers
+-- Buffer switching
 vim.keymap.set("n", "<S-l>", ":bnext<CR>", { desc = "Next buffer" })
 vim.keymap.set("n", "<S-h>", ":bprevious<CR>", { desc = "Previous buffer" })
 vim.keymap.set("n", "<leader>x", ":bdelete!<CR>", { desc = "Close buffer" })
 
 -- ============================================================================
 -- AUTOCMDS
+--
+-- Global behaviors: auto-create directories on save, restore cursor position,
+-- quickfix UX, terminal gf navigation, and diagnostic display configuration.
 -- ============================================================================
 
--- Create parent directories on save
+-- Auto-create parent directories when saving a new file in a non-existent path.
+-- Eliminates "No such file or directory" errors from :w.
 vim.api.nvim_create_autocmd("BufWritePre", {
 	callback = function(event)
 		local dir = vim.fn.fnamemodify(event.match, ":h")
@@ -152,7 +209,9 @@ vim.api.nvim_create_autocmd("BufWritePre", {
 	end,
 })
 
--- Restore cursor position on file open
+-- Restore cursor to the last known position when reopening a file.
+-- '"' is the mark Neovim writes for the last cursor position in a file.
+-- Bounds-check needed: the file may have shrunk since the mark was recorded.
 vim.api.nvim_create_autocmd("BufReadPost", {
 	callback = function()
 		local mark = vim.api.nvim_buf_get_mark(0, '"')
@@ -163,7 +222,8 @@ vim.api.nvim_create_autocmd("BufReadPost", {
 	end,
 })
 
--- Quickfix: <CR> to jump+close, q/<Esc> to close
+-- Quickfix UX: jump to a result and close the window in one step (<CR>),
+-- or close without jumping (q / <Esc>).
 vim.api.nvim_create_autocmd("FileType", {
 	pattern = "qf",
 	callback = function(event)
@@ -174,12 +234,13 @@ vim.api.nvim_create_autocmd("FileType", {
 	end,
 })
 
--- Terminal: gf opens file in editor window (not terminal)
 vim.api.nvim_create_autocmd("TermOpen", {
 	callback = function(event)
-		-- Disable spellcheck in terminal
-		vim.opt_local.spell = false
+		vim.opt_local.spell = false  -- Spell checking is meaningless inside a terminal.
 
+		-- Override gf so it opens the file under cursor in an existing editor window
+		-- rather than inside the terminal. Falls back to aboveleft split if no editor
+		-- window is found. aboveleft avoids accidentally nesting a new terminal.
 		vim.keymap.set("n", "gf", function()
 			local file = vim.fn.expand("<cfile>")
 			if file == "" then
@@ -187,7 +248,6 @@ vim.api.nvim_create_autocmd("TermOpen", {
 				return
 			end
 
-			-- Find first non-terminal window
 			for _, win in ipairs(vim.api.nvim_list_wins()) do
 				local buf = vim.api.nvim_win_get_buf(win)
 				if vim.bo[buf].buftype ~= "terminal" then
@@ -197,21 +257,25 @@ vim.api.nvim_create_autocmd("TermOpen", {
 				end
 			end
 
-			-- No editor window found, create split
 			vim.cmd("aboveleft split " .. vim.fn.fnameescape(file))
 		end, { buffer = event.buf })
 	end,
 })
 
--- Diagnostic configuration
 vim.diagnostic.config({
+	-- No inline ghost text -- it clutters the editor and competes with code.
+	-- Diagnostics appear in a float via the CursorHold autocmd below instead.
 	virtual_text = false,
 	signs = true,
 	underline = true,
+	-- Don't re-evaluate diagnostics while typing; wait until leaving insert mode.
 	update_in_insert = false,
+	-- Show errors above warnings in floats and the sign column.
 	severity_sort = true,
 	float = {
 		border = "rounded",
+		-- Include the LSP source name only when multiple clients are attached
+		-- (avoids noise in the common single-client case).
 		source = "if_many",
 		focusable = true,
 		wrap = true,
@@ -220,7 +284,9 @@ vim.diagnostic.config({
 	},
 })
 
--- Show diagnostics on hover (since virtual_text is off)
+-- Companion to virtual_text=false: show a diagnostic float when the cursor rests
+-- on a line. focus=false keeps focus in the editing window.
+-- Triggered by updatetime (250ms, set in BASIC SETTINGS).
 vim.api.nvim_create_autocmd("CursorHold", {
 	callback = function()
 		vim.diagnostic.open_float(nil, { focus = false, scope = "cursor" })
@@ -278,6 +344,9 @@ _G._nvim_editor_open = function(file, sentinel)
 		cmp.setup.buffer({ enabled = false })
 	end
 
+	-- Guard against double-signalling: BufDelete/BufWipeout autocmd and the
+	-- close() function can both fire in some paths (e.g. external :bwipeout).
+	-- The flag ensures the sentinel file is written exactly once.
 	local sentinel_written = false
 	local function write_sentinel()
 		if not sentinel_written then
@@ -313,18 +382,20 @@ end
 
 -- ============================================================================
 -- CLAUDE CODE DIFF VIEW WINBAR
+--
+-- Adds [ ORIGINAL ] / [ PROPOSED ] labels to winbars during Claude Code diff
+-- reviews, using the claudecode_diff_tab_name buffer variable set by
+-- claudecode.nvim as the marker that identifies the proposed-change window.
 -- ============================================================================
 
--- Helper to safely read winbar (option may not exist on older nvim)
+-- Helper to safely read winbar (option may not exist on older Neovim).
 local function get_winbar(win)
 	local ok, val = pcall(vim.api.nvim_get_option_value, "winbar", { win = win })
 	return ok and val or nil
 end
 
--- Shows [ORIGINAL]/[PROPOSED] + file path in winbar of both diff windows.
--- Fires on window/option events; clears when diff is no longer active.
 local function update_claudecode_diff_winbars()
-	-- First pass: find proposed windows (identified by buffer variable set by claudecode.nvim)
+	-- Pass 1: identify windows that claudecode.nvim marked as proposed changes.
 	local proposed_wins = {}
 	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
 		if vim.api.nvim_win_is_valid(win) then
@@ -336,7 +407,7 @@ local function update_claudecode_diff_winbars()
 		end
 	end
 
-	-- No claudecode diff in this tab: clear any winbars we previously set
+	-- No Claude Code diff active in this tab: clear all winbars we previously set.
 	if #proposed_wins == 0 then
 		for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
 			if vim.api.nvim_win_is_valid(win) then
@@ -349,13 +420,13 @@ local function update_claudecode_diff_winbars()
 		return
 	end
 
-	-- Set winbar on proposed windows
+	-- Pass 2: label proposed windows.
 	for _, info in ipairs(proposed_wins) do
 		local rel = vim.fn.fnamemodify(info.tab_name, ":~:.")
 		pcall(vim.api.nvim_set_option_value, "winbar", "[ PROPOSED ]  " .. rel, { win = info.win })
 	end
 
-	-- Set winbar on original windows (diff mode on, no claudecode marker)
+	-- Pass 3: windows in diff mode without the claudecode marker are the originals.
 	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
 		if not vim.api.nvim_win_is_valid(win) then
 			goto continue
@@ -370,6 +441,8 @@ local function update_claudecode_diff_winbars()
 	end
 end
 
+-- Defer the update via vim.schedule: winbar changes during BufWinEnter/WinEnter
+-- can fire before the window layout is fully resolved, causing stale labels.
 vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter" }, {
 	desc = "Update winbar for Claude Code diff view",
 	callback = function()
@@ -387,6 +460,13 @@ vim.api.nvim_create_autocmd("OptionSet", {
 
 -- ============================================================================
 -- FILE GIT HISTORY NAVIGATOR IN SPLIT VIEW
+--
+-- Browse the git history of the current file in a 3-window layout:
+--   top:          fixed-height info panel (commit metadata + navigation hints)
+--   bottom-left:  current file in diff mode
+--   bottom-right: historical version in diff mode
+-- Trigger with <leader>gH. Navigate with [g (older) / ]g (newer).
+-- Close everything with <leader>gq.
 -- ============================================================================
 local git_history_state = {
 	commits = {},
@@ -397,6 +477,8 @@ local git_history_state = {
 	info_buf = nil,
 	info_win = nil,
 }
+-- Namespace for highlight marks in the info window. Using a namespace allows
+-- nvim_buf_clear_namespace to efficiently remove all highlights on each update.
 local git_history_ns = vim.api.nvim_create_namespace("git_history_info")
 
 local function load_file_history()
@@ -480,24 +562,29 @@ local function show_commit_diff(commit_hash)
 		"git show " .. commit_hash .. ":" .. vim.fn.shellescape(file:gsub(vim.fn.getcwd() .. "/", ""))
 	)
 
-	-- Capture filetype and cursor from original window before any window switching
+	-- Capture filetype before any window switching. After creating the diff/info
+	-- windows the current buffer changes, so vim.bo.filetype would return "" for
+	-- the new scratch buffer instead of the original file's filetype.
 	local orig_filetype = vim.bo[vim.api.nvim_win_get_buf(git_history_state.original_win)].filetype
 	local cursor_pos = vim.api.nvim_win_get_cursor(git_history_state.original_win)
 
-	-- Create or reuse windows
+	-- Create or reuse windows (idempotent: skipped on subsequent navigations)
 	if
 		not git_history_state.diff_buf
 		or not vim.api.nvim_buf_is_valid(git_history_state.diff_buf)
 		or not git_history_state.info_buf
 		or not vim.api.nvim_buf_is_valid(git_history_state.info_buf)
 	then
-		-- Create info window at top of tabpage (full width)
+		-- topleft creates a horizontal split spanning the full tabpage width,
+		-- not just the current column -- so the info bar sits above both file windows.
 		vim.api.nvim_set_current_win(git_history_state.original_win)
 		vim.cmd("topleft split")
 		git_history_state.info_win = vim.api.nvim_get_current_win()
 		git_history_state.info_buf = vim.api.nvim_create_buf(false, true)
 		vim.api.nvim_win_set_buf(git_history_state.info_win, git_history_state.info_buf)
 		vim.api.nvim_win_set_height(git_history_state.info_win, 4)
+		-- Prevent the info window from being resized when Neovim re-balances
+		-- windows (e.g. when the diff window is created below it).
 		vim.wo[git_history_state.info_win].winfixheight = true
 		vim.wo[git_history_state.info_win].number = false
 		vim.wo[git_history_state.info_win].relativenumber = false
@@ -529,13 +616,15 @@ local function show_commit_diff(commit_hash)
 	-- Set cursor to same position
 	pcall(vim.api.nvim_win_set_cursor, git_history_state.diff_win, cursor_pos)
 
-	-- Enable diff mode (targeted -- avoids enabling diff on info_win)
+	-- Enable diff mode on the two file windows only. windo diffthis would also
+	-- enable diff on the info panel, which must stay plain text.
 	vim.api.nvim_set_current_win(git_history_state.original_win)
 	vim.cmd("diffthis")
 	vim.api.nvim_set_current_win(git_history_state.diff_win)
 	vim.cmd("diffthis")
 
-	-- Disable folding in both windows after diff is enabled
+	-- Neovim automatically enables folding when diff mode is activated (foldmethod
+	-- becomes "diff"). Disable it immediately or diff context disappears inside folds.
 	vim.api.nvim_set_current_win(git_history_state.original_win)
 	vim.wo[git_history_state.original_win].foldenable = false
 	vim.api.nvim_set_current_win(git_history_state.diff_win)
@@ -628,6 +717,9 @@ end, { desc = "Close git history" })
 
 -- ============================================================================
 -- PLUGIN MANAGER
+--
+-- Bootstrap lazy.nvim (the plugin manager) if not already installed, then
+-- prepend it to the runtime path so it can be required.
 -- ============================================================================
 
 local lazypath = vim.fn.stdpath("data") .. "/lazy/lazy.nvim"
@@ -637,7 +729,7 @@ if not vim.loop.fs_stat(lazypath) then
 		"clone",
 		"--filter=blob:none",
 		"https://github.com/folke/lazy.nvim.git",
-		"--branch=stable",
+		"--branch=stable",  -- Use the stable branch to avoid breaking changes from main.
 		lazypath,
 	})
 end
@@ -645,19 +737,29 @@ vim.opt.rtp:prepend(lazypath)
 
 -- ============================================================================
 -- PLUGINS
+--
+-- All plugin declarations in lazy.nvim spec format. Each entry can specify:
+--   dependencies, event/cmd/ft/keys for lazy loading, and a config function.
 -- ============================================================================
 
 require("lazy").setup({
-	-- Theme
+	-- -------------------------------------------------------------------------
+	-- Theme: navarasu/onedark.nvim
+	-- -------------------------------------------------------------------------
 	{
 		"navarasu/onedark.nvim",
 		lazy = false,
+		-- priority = 1000: load before all other plugins so the colorscheme is
+		-- applied first and other plugins see the correct highlight groups.
 		priority = 1000,
 		config = function()
 			require("onedark").setup({
 				style = "dark",
+				-- transparent = false: keep the background opaque (no terminal bleed-through).
 				transparent = false,
 				term_colors = true,
+				-- Custom colors: override default backgrounds with pure black for
+				-- maximum contrast on dark/OLED displays.
 				colors = {
 					black = "#000000",
 					bg0 = "#000000",
@@ -673,19 +775,19 @@ require("lazy").setup({
 		end,
 	},
 
-	-- Treesitter (syntax highlighting, smart selection)
-	-- main branch (0.12+): setup() only accepts install_dir.
-	-- Highlighting is native Neovim (vim.treesitter.start via FileType autocmd).
-	-- Indent uses nvim-treesitter's indentexpr per-buffer.
-	-- Parsers are installed explicitly via require('nvim-treesitter').install{}.
+	-- -------------------------------------------------------------------------
+	-- Treesitter: nvim-treesitter/nvim-treesitter
+	-- -------------------------------------------------------------------------
+	-- branch = "main": the 0.12+ API where setup() only accepts install_dir.
+	--   Highlighting is wired up manually via a FileType autocmd below.
+	-- lazy = false: nvim-treesitter does not support lazy loading on this branch.
+	-- No build step: parsers are compiled inside config() via install{}.
+	-- Run :TSUpdate manually after plugin updates to refresh parsers.
 	{
 		"nvim-treesitter/nvim-treesitter",
 		branch = "main",
-		lazy = false, -- plugin does not support lazy-loading
-		-- No build step: parsers are installed in config via require('nvim-treesitter').install{}.
-		-- Run :TSUpdate manually after plugin updates to refresh parsers.
+		lazy = false,
 		config = function()
-			-- Install parsers for languages we care about
 			require("nvim-treesitter").install({
 				"c",
 				"cpp",
@@ -701,8 +803,9 @@ require("lazy").setup({
 				"markdown_inline",
 			})
 
-			-- Enable treesitter highlighting and indentation for all filetypes
-			-- where a parser is available.
+			-- Enable treesitter highlighting and indentation for all filetypes where
+			-- a parser is available. pcall: silently skip unsupported filetypes.
+			-- indentexpr: use treesitter's smarter indentation for supported languages.
 			vim.api.nvim_create_autocmd("FileType", {
 				group = vim.api.nvim_create_augroup("ts_highlight", { clear = true }),
 				callback = function(ev)
@@ -714,10 +817,15 @@ require("lazy").setup({
 		end,
 	},
 
-	-- Fuzzy Finder
+	-- -------------------------------------------------------------------------
+	-- Fuzzy Finder: nvim-telescope/telescope.nvim
+	-- -------------------------------------------------------------------------
+	-- branch = "master": 0.1.x was dropped; master has Neovim 0.12 treesitter fixes.
+	-- telescope-fzf-native: compiled C extension for significantly faster fuzzy sorting.
+	-- telescope-file-browser: directory navigation integrated into the picker workflow.
 	{
 		"nvim-telescope/telescope.nvim",
-		branch = "master", -- 0.1.x dropped; master has Neovim 0.12 treesitter fixes
+		branch = "master",
 		dependencies = {
 			"nvim-lua/plenary.nvim",
 			{
@@ -736,12 +844,15 @@ require("lazy").setup({
 			-- Forward declaration (defined below, used by smart_find_files/smart_live_grep)
 			local directory_picker_for_mode
 
-			-- Cache fd command
+			-- fd is faster than find and correctly respects our ignore patterns.
+			-- Falls back to nil so telescope uses its built-in find when fd is absent.
 			local fd_command = vim.fn.executable("fd") == 1
 					and { "fd", "--type", "f", "--hidden", "--no-ignore-vcs", "--exclude", ".git" }
 				or nil
 
-			-- State for directory picker workflow
+			-- Shared state for the <C-b> round-trip between the directory picker and
+			-- the file/grep picker. mode records which picker to return to; original_cwd
+			-- and grep_filters carry over the previous picker's configuration.
 			local picker_state = {
 				mode = nil, -- "find_files" or "live_grep"
 				original_cwd = nil,
@@ -942,14 +1053,16 @@ require("lazy").setup({
 				})
 			end
 
-			-- Telescope setup
 			telescope.setup({
 				defaults = {
 					mappings = {
 						i = {
+							-- <Esc> in insert mode: stop insert but keep the picker open.
+							-- Default behaviour closes the picker entirely.
 							["<esc>"] = function()
 								vim.cmd("stopinsert")
 							end,
+							-- <C-q>: send all current results to the quickfix list.
 							["<C-q>"] = actions.send_to_qflist + actions.open_qflist,
 						},
 						n = {
@@ -958,8 +1071,11 @@ require("lazy").setup({
 							["<C-q>"] = actions.send_to_qflist + actions.open_qflist,
 						},
 					},
+					-- Keep the last 3 path components unshortened (exclude = {-1,-2,-3});
+					-- abbreviate intermediate directories to save screen space.
 					path_display = { shorten = { len = 3, exclude = { -1, -2, -3 } } },
 					dynamic_preview_title = true,
+					-- Exclude build artifacts and common dependency directories globally.
 					file_ignore_patterns = {
 						"%.git/",
 						"node_modules/",
@@ -970,8 +1086,10 @@ require("lazy").setup({
 				},
 				pickers = {
 					buffers = {
+						-- sort_mru: most recently used buffers appear at the top of the list.
 						sort_mru = true,
 						mappings = {
+							-- <C-d>/dd: delete a buffer from within the picker.
 							i = { ["<C-d>"] = actions.delete_buffer },
 							n = { ["dd"] = actions.delete_buffer },
 						},
@@ -979,8 +1097,11 @@ require("lazy").setup({
 				},
 				extensions = {
 					file_browser = {
+						-- hijack_netrw = false: netrw is already disabled globally; no conflict.
 						hijack_netrw = false,
+						-- respect_gitignore = false: show gitignored files so they can be inspected.
 						respect_gitignore = false,
+						-- depth = 1: show only immediate children, not a recursive tree.
 						depth = 1,
 						mappings = {
 							i = {
@@ -1027,12 +1148,15 @@ require("lazy").setup({
 		end,
 	},
 
-	-- Terminal
+	-- -------------------------------------------------------------------------
+	-- Terminal: akinsho/toggleterm.nvim
+	-- -------------------------------------------------------------------------
 	{
 		"akinsho/toggleterm.nvim",
 		version = "*",
 		opts = {
 			size = function(term)
+				-- 40% of window height/width -- large enough to work in, leaves room for code.
 				if term.direction == "horizontal" then
 					return vim.o.lines * 0.4
 				end
@@ -1042,28 +1166,28 @@ require("lazy").setup({
 			end,
 			open_mapping = [[<c-\>]],
 			hide_numbers = true,
-			shade_terminals = false,
-			start_in_insert = true,
+			shade_terminals = false,  -- No background dimming in the terminal.
+			start_in_insert = true,   -- Terminal opens ready to type.
 			direction = "horizontal",
-			close_on_exit = true,
+			close_on_exit = true,     -- Window closes when the shell process exits.
 			shell = vim.o.shell,
 		},
 		config = function(_, opts)
 			require("toggleterm").setup(opts)
 
-			-- Regular terminal instance (ID: 1)
+			-- Single persistent terminal instance, created lazily on first <C-\> press.
+			-- Lazy creation ensures get_smart_cwd() reflects the buffer open at that time.
 			local term = nil
 
 			vim.keymap.set({ "n", "t" }, "<C-\\>", function()
 				if not term then
 					local cwd = get_smart_cwd()
-					-- Validate directory exists
 					if vim.fn.isdirectory(cwd) == 0 then
 						cwd = vim.fn.getcwd()
 					end
 
 					term = require("toggleterm.terminal").Terminal:new({
-						id = 1, -- Explicit ID
+						id = 1,
 						direction = "horizontal",
 						dir = cwd,
 					})
@@ -1073,7 +1197,9 @@ require("lazy").setup({
 		end,
 	},
 
-	-- Claude Code Integration (via MCP WebSocket protocol)
+	-- -------------------------------------------------------------------------
+	-- Claude Code: coder/claudecode.nvim
+	-- -------------------------------------------------------------------------
 	{
 		"coder/claudecode.nvim",
 		dependencies = {
@@ -1083,13 +1209,21 @@ require("lazy").setup({
 			require("claudecode").setup({
 				terminal = {
 					split_side = "right",
+					-- 50%: Claude panel takes half the screen width.
 					split_width_percentage = 0.5,
+					-- provider = "snacks": use snacks.nvim for terminal rendering.
 					provider = "snacks",
 				},
 				diff_opts = {
+					-- open_in_new_tab: diff reviews open in a new tab, leaving the current
+					-- layout intact instead of inserting windows into the active split.
 					open_in_new_tab = true,
+					-- hide_terminal_in_new_tab: Claude panel is hidden in the diff tab
+					-- to reduce clutter (the diff is the focus there).
 					hide_terminal_in_new_tab = true,
 				},
+				-- focus_after_send: cursor moves into the Claude panel after <leader>cs
+				-- so you can immediately continue the conversation.
 				focus_after_send = true,
 			})
 
@@ -1106,11 +1240,15 @@ require("lazy").setup({
 		end,
 	},
 
-	-- Git integration
+	-- -------------------------------------------------------------------------
+	-- Git: tpope/vim-fugitive
+	-- -------------------------------------------------------------------------
 	{
 		"tpope/vim-fugitive",
 		config = function()
-			-- Git status opens in buffer's git root
+			-- cd to the git root before :Git so fugitive always shows the full
+			-- repository status, not a subdirectory. Necessary because the global
+			-- cwd may differ from the buffer's git root (see CONTEXT RESOLVER).
 			vim.keymap.set("n", "<leader>gs", function()
 				local ctx = get_buffer_context()
 				if not ctx.git_root then
@@ -1136,7 +1274,9 @@ require("lazy").setup({
 		end,
 	},
 
-	-- Git signs (inline diff markers
+	-- -------------------------------------------------------------------------
+	-- Git Signs: lewis6991/gitsigns.nvim
+	-- -------------------------------------------------------------------------
 	{
 		"lewis6991/gitsigns.nvim",
 		opts = {
@@ -1155,7 +1295,9 @@ require("lazy").setup({
 					vim.keymap.set(mode, lhs, rhs, opts)
 				end
 
-				-- Navigate hunks (respects diff mode)
+				-- expr = true: check vim.wo.diff at call time. When in a diff window
+				-- (e.g. fugitive's Gdiffsplit), use Vim's native ]c/[c instead of
+				-- gitsigns. Both tools share the same keys without conflict.
 				map("n", "]c", function()
 					if vim.wo.diff then
 						return "]c"
@@ -1183,23 +1325,31 @@ require("lazy").setup({
 		},
 	},
 
-	-- Comment toggling (gcc, gbc)
+	-- -------------------------------------------------------------------------
+	-- Comment toggling: numToStr/Comment.nvim  (default binds: gcc, gbc)
+	-- -------------------------------------------------------------------------
 	{
 		"numToStr/Comment.nvim",
 		opts = {},
 	},
 
-	-- Surround operations (ys, cs, ds)
+	-- -------------------------------------------------------------------------
+	-- Surround: tpope/vim-surround  (default binds: ys, cs, ds)
+	-- -------------------------------------------------------------------------
 	"tpope/vim-surround",
 
-	-- Auto pairs for brackets/quotes
+	-- -------------------------------------------------------------------------
+	-- Auto pairs: windwp/nvim-autopairs
+	-- -------------------------------------------------------------------------
 	{
 		"windwp/nvim-autopairs",
 		event = "InsertEnter",
 		opts = {},
 	},
 
-	-- Statusline
+	-- -------------------------------------------------------------------------
+	-- Statusline: nvim-lualine/lualine.nvim
+	-- -------------------------------------------------------------------------
 	{
 		"nvim-lualine/lualine.nvim",
 		dependencies = { "nvim-tree/nvim-web-devicons" },
@@ -1210,6 +1360,8 @@ require("lazy").setup({
 				section_separators = "",
 			},
 			sections = {
+				-- lualine_c: repo name (from git root basename) followed by filename.
+				-- Shows which project you are in when editing across multiple repositories.
 				lualine_c = {
 					{
 						function()
@@ -1227,16 +1379,24 @@ require("lazy").setup({
 		},
 	},
 
-	-- Which-key (shows keybinding hints)
+	-- -------------------------------------------------------------------------
+	-- Which-key: folke/which-key.nvim
+	-- -------------------------------------------------------------------------
 	{
 		"folke/which-key.nvim",
 		event = "VeryLazy",
 		opts = {
-			delay = 300,
+			delay = 300,  -- Matches timeoutlen (set in BASIC SETTINGS).
 		},
 	},
 
-	-- LSP
+	-- -------------------------------------------------------------------------
+	-- LSP: neovim/nvim-lspconfig + mason + mason-lspconfig
+	-- -------------------------------------------------------------------------
+	-- mason: manages LSP server binaries.
+	-- mason-lspconfig: bridges mason and lspconfig.
+	-- fidget: progress spinner for background LSP operations.
+	-- neodev: Neovim Lua API type hints when editing init.lua.
 	{
 		"neovim/nvim-lspconfig",
 		dependencies = {
@@ -1255,6 +1415,8 @@ require("lazy").setup({
 				automatic_installation = false,
 			})
 
+			-- Merge default capabilities with nvim-cmp's so the server knows the
+			-- client supports snippet completion and label-detail fields.
 			local capabilities = vim.lsp.protocol.make_client_capabilities()
 			capabilities = vim.tbl_deep_extend("force", capabilities, require("cmp_nvim_lsp").default_capabilities())
 
@@ -1264,7 +1426,8 @@ require("lazy").setup({
 					local opts = { buffer = ev.buf }
 					local builtin = require("telescope.builtin")
 
-					-- Navigation
+					-- gd/gr/gi/gt: route through Telescope for a picker UI instead of the
+					-- default quickfix/location-list (harder to navigate at speed).
 					vim.keymap.set("n", "gd", builtin.lsp_definitions, opts)
 					vim.keymap.set("n", "gr", builtin.lsp_references, opts)
 					vim.keymap.set("n", "gi", builtin.lsp_implementations, opts)
@@ -1300,7 +1463,8 @@ require("lazy").setup({
 						vim.lsp.inlay_hint.enable(not enabled, { bufnr = 0 })
 					end, { buffer = ev.buf, desc = "Toggle inlay hints" })
 
-					-- Debug: show LSP root
+					-- Debug helper: shows which directory the LSP picked as the project root.
+				-- Useful to verify that clangd/pyright found the right compile_commands.json.
 					vim.keymap.set("n", "<leader>pi", function()
 						if not client then
 							vim.notify("No LSP client attached", vim.log.levels.WARN)
@@ -1312,19 +1476,22 @@ require("lazy").setup({
 				end,
 			})
 
-			-- Clangd configuration
+			-- vim.lsp.config() + vim.lsp.enable(): Neovim 0.10+ API, cleaner than the
+			-- older require("lspconfig").clangd.setup() pattern.
 			vim.lsp.config("clangd", {
 				cmd = {
 					"clangd",
-					"--background-index",
-					"--clang-tidy",
-					"--header-insertion=iwyu",
-					"--completion-style=detailed",
-					"--function-arg-placeholders=true",
+					"--background-index",        -- Build index in background for cross-TU go-to-def.
+					"--clang-tidy",              -- Run clang-tidy checks as you edit.
+					"--header-insertion=iwyu",   -- Suggest includes based on IWYU analysis.
+					"--completion-style=detailed", -- Show full parameter lists in completion items.
+					"--function-arg-placeholders=true", -- Insert placeholders on function completion.
 					"--inlay-hints",
 				},
 				capabilities = capabilities,
 				filetypes = { "c", "cpp", "objc", "objcpp", "cuda", "proto" },
+				-- root_markers: ordered list -- compile_commands.json takes precedence;
+				-- .git is the final fallback for projects without a compilation database.
 				root_markers = {
 					"compile_commands.json",
 					".clangd",
@@ -1354,7 +1521,9 @@ require("lazy").setup({
 		end,
 	},
 
-	-- Autocompletion
+	-- -------------------------------------------------------------------------
+	-- Autocompletion: hrsh7th/nvim-cmp
+	-- -------------------------------------------------------------------------
 	{
 		"hrsh7th/nvim-cmp",
 		dependencies = {
@@ -1380,7 +1549,9 @@ require("lazy").setup({
 					["<C-f>"] = cmp.mapping.scroll_docs(4),
 					["<C-Space>"] = cmp.mapping.complete(),
 					["<C-e>"] = cmp.mapping.abort(),
-					["<CR>"] = cmp.mapping.confirm({ select = true }),
+					-- select = true: confirm the first item even when nothing is explicitly
+				-- highlighted, so Enter always picks something when the menu is visible.
+				["<CR>"] = cmp.mapping.confirm({ select = true }),
 					["<Tab>"] = cmp.mapping(function(fallback)
 						if cmp.visible() then
 							cmp.select_next_item()
@@ -1400,6 +1571,8 @@ require("lazy").setup({
 						end
 					end, { "i", "s" }),
 				}),
+				-- Two source groups: group 1 (LSP, snippets, paths) has higher priority
+				-- than group 2 (buffer words), so buffer completions don't crowd out LSP.
 				sources = cmp.config.sources({
 					{ name = "nvim_lsp" },
 					{ name = "luasnip" },
@@ -1443,7 +1616,8 @@ require("lazy").setup({
 		end,
 	},
 
-	-- Code formatter
+	-- conform.nvim -- explicit formatter, no auto-format on save
+	-- <leader>f: format current buffer (or visual selection in visual mode).
 	{
 		"stevearc/conform.nvim",
 		opts = {
@@ -1457,12 +1631,15 @@ require("lazy").setup({
 				sh = { "shfmt" },
 				bash = { "shfmt" },
 			},
+			-- format_on_save = false: formatting is explicit via <leader>f. Avoids surprises
+			-- when a formatter is misconfigured or slow.
 			format_on_save = false,
 		},
 		keys = {
 			{
 				"<leader>f",
 				function()
+					-- lsp_fallback = false: only use the formatters listed above; no silent LSP fallback.
 					require("conform").format({ async = true, lsp_fallback = false })
 				end,
 				desc = "Format buffer",
@@ -1478,22 +1655,33 @@ require("lazy").setup({
 		},
 	},
 
-	-- Auto-save on edit/focus loss
+	-- okuuva/auto-save.nvim -- two-tier save strategy
+	-- immediate_save (BufLeave/FocusLost): write right away when leaving the buffer
+	--   or window focus is lost -- safety net so no work is lost unexpectedly.
+	-- defer_save (InsertLeave/TextChanged): save after a debounce to avoid hammering
+	--   disk on every keystroke.
+	-- cancel_defered_save (InsertEnter): cancel the pending save when typing resumes,
+	--   restarting the debounce timer.
 	{
 		"okuuva/auto-save.nvim",
 		event = { "InsertLeave", "TextChanged" },
 		opts = {
 			enabled = true,
+			-- execution_message disabled: no status-line noise on each save.
 			execution_message = { enabled = false },
 			trigger_events = {
 				immediate_save = { "BufLeave", "FocusLost" },
 				defer_save = { "InsertLeave", "TextChanged" },
 				cancel_defered_save = { "InsertEnter" },
 			},
+			-- condition: only save real files (buftype == "") that are modifiable and named.
+			-- Skips terminal buffers, scratch buffers, and unnamed new files.
 			condition = function(buf)
 				return vim.bo[buf].buftype == "" and vim.bo[buf].modifiable and vim.fn.expand("%") ~= ""
 			end,
+			-- write_all_buffers = false: save only the current buffer on trigger.
 			write_all_buffers = false,
+			-- debounce_delay = 1000ms: wait 1 second of inactivity before writing on defer_save.
 			debounce_delay = 1000,
 		},
 		keys = {
@@ -1501,6 +1689,8 @@ require("lazy").setup({
 		},
 	},
 
+	-- folke/persistence.nvim -- session save/restore
+	-- Saves and restores the buffer list, window layout, and cursor positions.
 	{
 		"folke/persistence.nvim",
 		event = "BufReadPre",
@@ -1511,10 +1701,15 @@ require("lazy").setup({
 			-- Auto-restore on startup
 			vim.api.nvim_create_autocmd("VimEnter", {
 				callback = function()
+					-- argc == 0: only restore when Neovim is opened with no arguments.
+					-- Opening with a file argument skips restore to avoid conflicting with
+					-- the explicitly requested file.
 					if vim.fn.argc() == 0 then
 						require("persistence").load({ last = true })
 						vim.schedule(function()
-							-- Force reload all buffers to trigger treesitter
+							-- Force-reload each buffer to re-emit FileType events: persistence restores
+							-- buffers but does not trigger FileType, so treesitter highlighting is not
+							-- applied after restore. vim.cmd("edit") re-triggers FileType and fixes it.
 							for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 								if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == "" then
 									vim.api.nvim_buf_call(buf, function()
@@ -1527,7 +1722,10 @@ require("lazy").setup({
 				end,
 			})
 
-			-- Auto-save every 30s if changes happened
+			-- Background timer: save the session every 30 seconds when changes have occurred.
+			-- Ensures recovery is possible after a crash even without a clean :wq.
+			-- dirty flag: only write when a buffer event has happened since the last save,
+			-- avoiding unnecessary disk writes when Neovim is idle.
 			local dirty = false
 			vim.api.nvim_create_autocmd({ "BufWritePost", "BufEnter", "BufLeave" }, {
 				callback = function()
@@ -1553,6 +1751,8 @@ require("lazy").setup({
 			{
 				"<leader>qr",
 				function()
+					-- Stop recording the session first so the wiped state is not saved,
+					-- then close all buffers. Next startup starts fresh with an empty session.
 					require("persistence").stop()
 					vim.cmd("bufdo bwipeout | only | enew")
 				end,
