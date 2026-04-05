@@ -30,8 +30,8 @@ vim.g.loaded_netrw = 1
 vim.g.loaded_netrwPlugin = 1
 
 -- UI
-vim.opt.number = true
-vim.opt.relativenumber = true
+vim.opt.number = false
+vim.opt.relativenumber = false
 vim.opt.signcolumn = "yes" -- Always show to avoid layout shifts when diagnostics/git signs appear.
 vim.opt.cursorline = true
 vim.opt.termguicolors = true
@@ -972,7 +972,7 @@ require("lazy").setup({
                                     fb_actions.change_cwd(pb)
                                     local picker = action_state.get_current_picker(pb)
                                     picker.results_border:change_title(
-                                        "cwd: " .. vim.fn.fnamemodify(path, ":~")
+                                        "Setting CWD to: " .. vim.fn.fnamemodify(path, ":~")
                                     )
                                 else
                                     actions.close(pb)
@@ -1163,6 +1163,9 @@ require("lazy").setup({
                     split_width_percentage = 0.5,
                     -- provider = "snacks": use snacks.nvim for terminal rendering.
                     provider = "snacks",
+                    snacks_win_opts = {
+                        wo = { winbar = "" },
+                    },
                 },
                 diff_opts = {
                     -- open_in_new_tab: diff reviews open in a new tab, leaving the current
@@ -1336,11 +1339,10 @@ require("lazy").setup({
                         end,
                         color = { fg = "#61afef" },
                     },
-                    {
-                        "filename",
-                        path = 1,
-                    },
+                    { "filename", path = 1 },
                 },
+                lualine_x = {},
+                lualine_y = { "progress" },
             },
         },
     },
