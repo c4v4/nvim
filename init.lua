@@ -123,8 +123,9 @@ local function get_buffer_context()
     local dir = bufpath ~= "" and vim.fn.fnamemodify(bufpath, ":h") or vim.fn.getcwd()
 
     -- Find git root from buffer directory
-    local git_root =
-        vim.fn.systemlist("git -C " .. vim.fn.shellescape(dir) .. " rev-parse --show-toplevel 2>/dev/null")[1]
+    local git_root = vim.fn.systemlist(
+        "git -C " .. vim.fn.shellescape(dir) .. " rev-parse --show-toplevel 2>/dev/null"
+    )[1]
 
     return {
         path = bufpath ~= "" and bufpath or vim.fn.getcwd(),
@@ -510,11 +511,14 @@ local git_history_state = {
 local git_history_ns = vim.api.nvim_create_namespace("git_history_info")
 
 local function update_info_win(commit_hash)
-    if not git_history_state.info_buf or not vim.api.nvim_buf_is_valid(git_history_state.info_buf) then
+    if
+        not git_history_state.info_buf or not vim.api.nvim_buf_is_valid(git_history_state.info_buf)
+    then
         return
     end
 
-    local raw = vim.fn.system('git show --no-patch --format="%h%x01%s%x01%an%x01%ar%x01%b" ' .. commit_hash)
+    local raw =
+        vim.fn.system('git show --no-patch --format="%h%x01%s%x01%an%x01%ar%x01%b" ' .. commit_hash)
     local parts = vim.split(raw, "\1", { plain = true })
     local hash = vim.trim(parts[1] or "")
     local subject = vim.trim(parts[2] or "")
@@ -525,56 +529,76 @@ local function update_info_win(commit_hash)
     local idx = git_history_state.index
     local total = #git_history_state.commits
 
-    local lines = {
-        string.format("  Git History [ %d / %d ]     [g older   ]g newer   <leader>gq close", idx, total),
-        string.format("  %s  %s  --  %s", hash, author, date),
-        string.format("  %s", subject),
+    -- Build a line from a list of {text, hl_group_or_nil} tokens.
+    -- Concatenates the tokens into a single string while tracking byte offsets,
+    -- so each highlighted token's column range is computed without any string
+    -- searching after the fact. Returns {text, specs} where specs is a list of
+    -- {hl_group, start_col, end_col} ready for nvim_buf_set_extmark.
+    local function build_line(tokens)
+        local text, specs = "", {}
+        for _, tok in ipairs(tokens) do
+            local col = #text
+            text = text .. tok[1]
+            if tok[2] and #tok[1] > 0 then
+                table.insert(specs, { tok[2], col, #text })
+            end
+        end
+        -- Returned as a single table (not two return values) so callers can
+        -- safely embed this call inside a table constructor without Lua
+        -- silently dropping the second return value.
+        return { text, specs }
+    end
+
+    -- Each structured line is a {text, specs} pair from build_line.
+    -- Content and highlight groups are defined together, token by token.
+    local structured = {
+        build_line({
+            { "  Git History", "Title" },
+            { string.format(" [ %d / %d ] ", idx, total), "Number" },
+            { "     [g older    ]g newer   <leader>gq close", "Keyword" },
+        }),
+        build_line({
+            { "  " .. hash, "Constant" },
+            { "  " .. author, "Identifier" },
+            { "  --  " .. date, "Comment" }, -- separator and date share Comment
+        }),
+        build_line({
+            { "  " .. subject, "String" },
+        }),
     }
+
+    -- Append body lines as plain pairs (no highlights).
+    local lines = {}
+    for _, pair in ipairs(structured) do
+        table.insert(lines, pair)
+    end
     for _, bl in ipairs(vim.split(body, "\n", { plain = true })) do
-        table.insert(lines, "  " .. bl)
+        table.insert(lines, { "  " .. bl, {} })
     end
 
     local buf = git_history_state.info_buf
     vim.bo[buf].modifiable = true
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.api.nvim_buf_set_lines(
+        buf,
+        0,
+        -1,
+        false,
+        vim.tbl_map(function(l)
+            return l[1]
+        end, lines)
+    )
     vim.bo[buf].modifiable = false
 
-    -- Apply highlights
+    -- Apply highlights via extmarks. nvim_buf_set_extmark replaces the
+    -- deprecated nvim_buf_add_highlight and accepts the same ns/hl_group model.
     vim.api.nvim_buf_clear_namespace(buf, git_history_ns, 0, -1)
-
-    -- Line 0: "  Git History [ N / M ]     [g older   ]g newer   <leader>gq close"
-    local l0 = lines[1]
-    local ht_s, ht_e = l0:find("Git History")
-    if ht_s then
-        vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Title", 0, ht_s - 1, ht_e)
-    end
-    local cnt_s, cnt_e = l0:find("%[%s*%d[^%]]*%]")
-    if cnt_s then
-        vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Number", 0, cnt_s - 1, cnt_e)
-    end
-    for _, pat in ipairs({ "%[g older", "%]g newer", "<leader>gq close" }) do
-        local ps, pe = l0:find(pat)
-        if ps then
-            vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Keyword", 0, ps - 1, pe)
+    for line_idx, pair in ipairs(lines) do
+        for _, spec in ipairs(pair[2] or {}) do
+            vim.api.nvim_buf_set_extmark(buf, git_history_ns, line_idx - 1, spec[2], {
+                end_col = spec[3],
+                hl_group = spec[1],
+            })
         end
-    end
-
-    -- Line 1: "  hash  author  --  date"
-    if #hash > 0 then
-        vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Constant", 1, 2, 2 + #hash)
-    end
-    local author_start = 2 + #hash + 2
-    if #author > 0 then
-        vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Identifier", 1, author_start, author_start + #author)
-    end
-    local sep_s = lines[2]:find("  %-%-  ")
-    if sep_s then
-        vim.api.nvim_buf_add_highlight(buf, git_history_ns, "Comment", 1, sep_s - 1, -1)
-    end
-
-    -- Line 2: subject
-    if #subject > 0 then
-        vim.api.nvim_buf_add_highlight(buf, git_history_ns, "String", 2, 2, -1)
     end
 end
 
@@ -584,7 +608,8 @@ local function show_commit_diff(commit_hash)
     -- fragile: if cwd differs from git root the prefix strip failed silently.
     local git_root = get_buffer_context().git_root or vim.fn.getcwd()
     local rel_path = file:sub(#git_root + 2) -- strip "root/" prefix
-    local content = vim.fn.systemlist("git show " .. commit_hash .. ":" .. vim.fn.shellescape(rel_path))
+    local content =
+        vim.fn.systemlist("git show " .. commit_hash .. ":" .. vim.fn.shellescape(rel_path))
 
     -- Capture filetype before any window switching. After creating the diff/info
     -- windows the current buffer changes, so vim.bo.filetype would return "" for
@@ -618,6 +643,7 @@ local function show_commit_diff(commit_hash)
         vim.wo[git_history_state.info_win].foldenable = false
         vim.bo[git_history_state.info_buf].buftype = "nofile"
         vim.bo[git_history_state.info_buf].modifiable = false
+        vim.wo[git_history_state.info_win].spell = false
 
         -- Create diff window (vsplit from original)
         vim.api.nvim_set_current_win(git_history_state.original_win)
@@ -673,7 +699,8 @@ end
 
 vim.keymap.set("n", "<leader>gH", function()
     local file = vim.fn.expand("%:p")
-    git_history_state.commits = vim.fn.systemlist("git log --format=%H -- " .. vim.fn.shellescape(file))
+    git_history_state.commits =
+        vim.fn.systemlist("git log --format=%H -- " .. vim.fn.shellescape(file))
     if #git_history_state.commits == 0 then
         vim.notify("No git history for this file", vim.log.levels.WARN)
         return
@@ -703,7 +730,9 @@ vim.keymap.set("n", "]g", function()
 end, { desc = "Newer commit" })
 
 vim.keymap.set("n", "<leader>gq", function()
-    if git_history_state.original_win and vim.api.nvim_win_is_valid(git_history_state.original_win) then
+    if
+        git_history_state.original_win and vim.api.nvim_win_is_valid(git_history_state.original_win)
+    then
         vim.api.nvim_set_current_win(git_history_state.original_win)
         vim.cmd("diffoff")
         pcall(vim.api.nvim_set_option_value, "winbar", "", { win = git_history_state.original_win })
@@ -719,7 +748,9 @@ vim.keymap.set("n", "<leader>gq", function()
     if git_history_state.info_buf and vim.api.nvim_buf_is_valid(git_history_state.info_buf) then
         vim.api.nvim_buf_delete(git_history_state.info_buf, { force = true })
     end
-    if git_history_state.original_win and vim.api.nvim_win_is_valid(git_history_state.original_win) then
+    if
+        git_history_state.original_win and vim.api.nvim_win_is_valid(git_history_state.original_win)
+    then
         vim.api.nvim_set_current_win(git_history_state.original_win)
     end
     git_history_state = {
@@ -1031,7 +1062,9 @@ require("lazy").setup({
                                 if vim.fn.isdirectory(path) == 1 then
                                     fb_actions.change_cwd(pb)
                                     local picker = action_state.get_current_picker(pb)
-                                    picker.results_border:change_title("cwd: " .. vim.fn.fnamemodify(path, ":~"))
+                                    picker.results_border:change_title(
+                                        "cwd: " .. vim.fn.fnamemodify(path, ":~")
+                                    )
                                 else
                                     actions.close(pb)
                                     vim.cmd("edit " .. vim.fn.fnameescape(path))
@@ -1138,7 +1171,12 @@ require("lazy").setup({
             vim.keymap.set("n", "<leader>sf", file_browser_mode, { desc = "File browser" })
             vim.keymap.set("n", "<leader>sg", smart_live_grep, { desc = "Search grep" })
             vim.keymap.set("n", "<leader>sb", builtin.buffers, { desc = "Search buffers" })
-            vim.keymap.set("n", "<leader>ss", builtin.lsp_document_symbols, { desc = "Search symbols (file)" })
+            vim.keymap.set(
+                "n",
+                "<leader>ss",
+                builtin.lsp_document_symbols,
+                { desc = "Search symbols (file)" }
+            )
             vim.keymap.set(
                 "n",
                 "<leader>sS",
@@ -1231,15 +1269,30 @@ require("lazy").setup({
             })
 
             -- Keybindings (keeping <leader>c prefix)
-            vim.keymap.set({ "n", "t" }, "<leader>cc", "<cmd>ClaudeCode<cr>", { desc = "Toggle Claude Code" })
+            vim.keymap.set(
+                { "n", "t" },
+                "<leader>cc",
+                "<cmd>ClaudeCode<cr>",
+                { desc = "Toggle Claude Code" }
+            )
             vim.keymap.set("v", "<leader>cs", function()
                 vim.cmd("ClaudeCodeSend")
                 vim.schedule(function()
                     vim.cmd("startinsert")
                 end)
             end, { desc = "Send selection to Claude" })
-            vim.keymap.set("n", "<leader>cda", "<cmd>ClaudeCodeDiffAccept<cr>", { desc = "Accept Claude diff" })
-            vim.keymap.set("n", "<leader>cdd", "<cmd>ClaudeCodeDiffDeny<cr>", { desc = "Deny Claude diff" })
+            vim.keymap.set(
+                "n",
+                "<leader>cda",
+                "<cmd>ClaudeCodeDiffAccept<cr>",
+                { desc = "Accept Claude diff" }
+            )
+            vim.keymap.set(
+                "n",
+                "<leader>cdd",
+                "<cmd>ClaudeCodeDiffDeny<cr>",
+                { desc = "Deny Claude diff" }
+            )
         end,
     },
 
@@ -1369,7 +1422,8 @@ require("lazy").setup({
                     {
                         function()
                             local ctx = get_buffer_context()
-                            return ctx.git_root and " " .. vim.fn.fnamemodify(ctx.git_root, ":t") or ""
+                            return ctx.git_root and " " .. vim.fn.fnamemodify(ctx.git_root, ":t")
+                                or ""
                         end,
                         color = { fg = "#61afef" },
                     },
@@ -1421,7 +1475,11 @@ require("lazy").setup({
             -- Merge default capabilities with nvim-cmp's so the server knows the
             -- client supports snippet completion and label-detail fields.
             local capabilities = vim.lsp.protocol.make_client_capabilities()
-            capabilities = vim.tbl_deep_extend("force", capabilities, require("cmp_nvim_lsp").default_capabilities())
+            capabilities = vim.tbl_deep_extend(
+                "force",
+                capabilities,
+                require("cmp_nvim_lsp").default_capabilities()
+            )
 
             vim.api.nvim_create_autocmd("LspAttach", {
                 group = vim.api.nvim_create_augroup("UserLspConfig", {}),
@@ -1680,7 +1738,9 @@ require("lazy").setup({
             -- condition: only save real files (buftype == "") that are modifiable and named.
             -- Skips terminal buffers, scratch buffers, and unnamed new files.
             condition = function(buf)
-                return vim.bo[buf].buftype == "" and vim.bo[buf].modifiable and vim.fn.expand("%") ~= ""
+                return vim.bo[buf].buftype == ""
+                    and vim.bo[buf].modifiable
+                    and vim.fn.expand("%") ~= ""
             end,
             -- write_all_buffers = false: save only the current buffer on trigger.
             write_all_buffers = false,
@@ -1714,7 +1774,10 @@ require("lazy").setup({
                             -- buffers but does not trigger FileType, so treesitter highlighting is not
                             -- applied after restore. vim.cmd("edit") re-triggers FileType and fixes it.
                             for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-                                if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == "" then
+                                if
+                                    vim.api.nvim_buf_is_loaded(buf)
+                                    and vim.bo[buf].buftype == ""
+                                then
                                     vim.api.nvim_buf_call(buf, function()
                                         vim.cmd("edit")
                                     end)
