@@ -506,100 +506,27 @@ local git_history_state = {
     info_buf = nil,
     info_win = nil,
 }
--- Namespace for highlight marks in the info window. Using a namespace allows
--- nvim_buf_clear_namespace to efficiently remove all highlights on each update.
-local git_history_ns = vim.api.nvim_create_namespace("git_history_info")
-
 local function update_info_win(commit_hash)
     if
-        not git_history_state.info_buf or not vim.api.nvim_buf_is_valid(git_history_state.info_buf)
+        not git_history_state.info_win or not vim.api.nvim_win_is_valid(git_history_state.info_win)
     then
         return
     end
 
-    local raw =
-        vim.fn.system('git show --no-patch --format="%h%x01%s%x01%an%x01%ar%x01%b" ' .. commit_hash)
-    local parts = vim.split(raw, "\1", { plain = true })
-    local hash = vim.trim(parts[1] or "")
-    local subject = vim.trim(parts[2] or "")
-    local author = vim.trim(parts[3] or "")
-    local date = vim.trim(parts[4] or "")
-    local body = parts[5] or ""
-
-    local idx = git_history_state.index
-    local total = #git_history_state.commits
-
-    -- Build a line from a list of {text, hl_group_or_nil} tokens.
-    -- Concatenates the tokens into a single string while tracking byte offsets,
-    -- so each highlighted token's column range is computed without any string
-    -- searching after the fact. Returns {text, specs} where specs is a list of
-    -- {hl_group, start_col, end_col} ready for nvim_buf_set_extmark.
-    local function build_line(tokens)
-        local text, specs = "", {}
-        for _, tok in ipairs(tokens) do
-            local col = #text
-            text = text .. tok[1]
-            if tok[2] and #tok[1] > 0 then
-                table.insert(specs, { tok[2], col, #text })
-            end
-        end
-        -- Returned as a single table (not two return values) so callers can
-        -- safely embed this call inside a table constructor without Lua
-        -- silently dropping the second return value.
-        return { text, specs }
+    -- Terminal buffers are append-only, so create a fresh one on each navigation
+    -- and delete the previous one. nvim_open_term renders ANSI color codes from
+    -- git directly, so no manual token/highlight logic is needed.
+    local old_buf = git_history_state.info_buf
+    local buf = vim.api.nvim_create_buf(false, true)
+    local term = vim.api.nvim_open_term(buf, {})
+    vim.api.nvim_win_set_buf(git_history_state.info_win, buf)
+    git_history_state.info_buf = buf
+    if old_buf and vim.api.nvim_buf_is_valid(old_buf) then
+        vim.api.nvim_buf_delete(old_buf, { force = true })
     end
 
-    -- Each structured line is a {text, specs} pair from build_line.
-    -- Content and highlight groups are defined together, token by token.
-    local structured = {
-        build_line({
-            { "  Git History", "Title" },
-            { string.format(" [ %d / %d ] ", idx, total), "Number" },
-            { "     [g older    ]g newer   <leader>gq close", "Keyword" },
-        }),
-        build_line({
-            { "  " .. hash, "Constant" },
-            { "  " .. author, "Identifier" },
-            { "  --  " .. date, "Comment" }, -- separator and date share Comment
-        }),
-        build_line({
-            { "  " .. subject, "String" },
-        }),
-    }
-
-    -- Append body lines as plain pairs (no highlights).
-    local lines = {}
-    for _, pair in ipairs(structured) do
-        table.insert(lines, pair)
-    end
-    for _, bl in ipairs(vim.split(body, "\n", { plain = true })) do
-        table.insert(lines, { "  " .. bl, {} })
-    end
-
-    local buf = git_history_state.info_buf
-    vim.bo[buf].modifiable = true
-    vim.api.nvim_buf_set_lines(
-        buf,
-        0,
-        -1,
-        false,
-        vim.tbl_map(function(l)
-            return l[1]
-        end, lines)
-    )
-    vim.bo[buf].modifiable = false
-
-    -- Apply highlights via extmarks. nvim_buf_set_extmark replaces the
-    -- deprecated nvim_buf_add_highlight and accepts the same ns/hl_group model.
-    vim.api.nvim_buf_clear_namespace(buf, git_history_ns, 0, -1)
-    for line_idx, pair in ipairs(lines) do
-        for _, spec in ipairs(pair[2] or {}) do
-            vim.api.nvim_buf_set_extmark(buf, git_history_ns, line_idx - 1, spec[2], {
-                end_col = spec[3],
-                hl_group = spec[1],
-            })
-        end
-    end
+    local out = vim.fn.system("git show --no-patch --color=always --decorate " .. commit_hash)
+    vim.api.nvim_chan_send(term, out)
 end
 
 local function show_commit_diff(commit_hash)
@@ -619,19 +546,14 @@ local function show_commit_diff(commit_hash)
 
     -- Create or reuse windows (idempotent: skipped on subsequent navigations)
     if
-        not git_history_state.diff_buf
-        or not vim.api.nvim_buf_is_valid(git_history_state.diff_buf)
-        or not git_history_state.info_buf
-        or not vim.api.nvim_buf_is_valid(git_history_state.info_buf)
+        not git_history_state.info_win or not vim.api.nvim_win_is_valid(git_history_state.info_win)
     then
         -- topleft creates a horizontal split spanning the full tabpage width,
         -- not just the current column -- so the info bar sits above both file windows.
         vim.api.nvim_set_current_win(git_history_state.original_win)
         vim.cmd("topleft split")
         git_history_state.info_win = vim.api.nvim_get_current_win()
-        git_history_state.info_buf = vim.api.nvim_create_buf(false, true)
-        vim.api.nvim_win_set_buf(git_history_state.info_win, git_history_state.info_buf)
-        vim.api.nvim_win_set_height(git_history_state.info_win, 4)
+        vim.api.nvim_win_set_height(git_history_state.info_win, 5)
         -- Prevent the info window from being resized when Neovim re-balances
         -- windows (e.g. when the diff window is created below it).
         vim.wo[git_history_state.info_win].winfixheight = true
@@ -641,9 +563,9 @@ local function show_commit_diff(commit_hash)
         vim.wo[git_history_state.info_win].statusline = " "
         vim.wo[git_history_state.info_win].wrap = false
         vim.wo[git_history_state.info_win].foldenable = false
-        vim.bo[git_history_state.info_buf].buftype = "nofile"
-        vim.bo[git_history_state.info_buf].modifiable = false
         vim.wo[git_history_state.info_win].spell = false
+        -- Navigation hints in the winbar (content area shows raw git output).
+        vim.wo[git_history_state.info_win].winbar = "  [g older    ]g newer   <leader>gq close"
 
         -- Create diff window (vsplit from original)
         vim.api.nvim_set_current_win(git_history_state.original_win)
