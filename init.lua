@@ -128,7 +128,6 @@ local function get_buffer_context()
     )[1]
 
     return {
-        path = bufpath ~= "" and bufpath or vim.fn.getcwd(),
         dir = dir,
         git_root = (git_root and git_root ~= "") and git_root or nil,
         is_real_file = bufpath ~= "",
@@ -413,6 +412,10 @@ end
 -- claudecode.nvim as the marker that identifies the proposed-change window.
 -- ============================================================================
 
+local function set_winbar(win, text)
+    pcall(vim.api.nvim_set_option_value, "winbar", text, { win = win })
+end
+
 local function update_claudecode_diff_winbars()
     local all_wins = vim.api.nvim_tabpage_list_wins(0)
     local has_proposed = false
@@ -423,12 +426,7 @@ local function update_claudecode_diff_winbars()
             local tab_name = vim.b[vim.api.nvim_win_get_buf(win)].claudecode_diff_tab_name
             if tab_name then
                 has_proposed = true
-                pcall(
-                    vim.api.nvim_set_option_value,
-                    "winbar",
-                    "[ PROPOSED ]  " .. vim.fn.fnamemodify(tab_name, ":~:."),
-                    { win = win }
-                )
+                set_winbar(win, "[ PROPOSED ]  " .. vim.fn.fnamemodify(tab_name, ":~:."))
             end
         end
     end
@@ -442,12 +440,7 @@ local function update_claudecode_diff_winbars()
                 if has_proposed and vim.wo[win].diff then
                     local path = vim.api.nvim_buf_get_name(buf)
                     local rel = path ~= "" and vim.fn.fnamemodify(path, ":~:.") or "[No Name]"
-                    pcall(
-                        vim.api.nvim_set_option_value,
-                        "winbar",
-                        "[ ORIGINAL ]  " .. rel,
-                        { win = win }
-                    )
+                    set_winbar(win, "[ ORIGINAL ]  " .. rel)
                 elseif not has_proposed then
                     local ok, wb = pcall(vim.api.nvim_get_option_value, "winbar", { win = win })
                     if
@@ -455,7 +448,7 @@ local function update_claudecode_diff_winbars()
                         and wb
                         and (wb:match("^%[ PROPOSED %]") or wb:match("^%[ ORIGINAL %]"))
                     then
-                        pcall(vim.api.nvim_set_option_value, "winbar", "", { win = win })
+                        set_winbar(win, "")
                     end
                 end
             end
@@ -600,19 +593,8 @@ local function show_commit_diff(commit_hash)
     -- Minimal winbars (full context is in info_win)
     local idx = git_history_state.index
     local total = #git_history_state.commits
-    pcall(
-        vim.api.nvim_set_option_value,
-        "winbar",
-        string.format("%%#Comment#[ %d / %d ]%%*", idx, total),
-        { win = git_history_state.diff_win }
-    )
-    local file_name = vim.fn.fnamemodify(file, ":~:.")
-    pcall(
-        vim.api.nvim_set_option_value,
-        "winbar",
-        "[ CURRENT ]  " .. file_name,
-        { win = git_history_state.original_win }
-    )
+    set_winbar(git_history_state.diff_win, string.format("%%#Comment#[ %d / %d ]%%*", idx, total))
+    set_winbar(git_history_state.original_win, "[ CURRENT ]  " .. vim.fn.fnamemodify(file, ":~:."))
 
     -- Update info window content
     update_info_win(commit_hash)
@@ -668,7 +650,7 @@ vim.keymap.set("n", "<leader>gq", function()
     pcall(vim.api.nvim_buf_delete, git_history_state.info_buf, { force = true })
     if pcall(vim.api.nvim_set_current_win, git_history_state.original_win) then
         vim.cmd("diffoff")
-        pcall(vim.api.nvim_set_option_value, "winbar", "", { win = git_history_state.original_win })
+        set_winbar(git_history_state.original_win, "")
     end
     git_history_state = default_git_history_state()
 end, { desc = "Close git history" })
@@ -809,11 +791,10 @@ require("lazy").setup({
                 or nil
 
             -- Shared state for the <C-b> round-trip between the directory picker and
-            -- the file/grep picker. mode records which picker to return to; original_cwd
-            -- and grep_filters carry over the previous picker's configuration.
+            -- the file/grep picker. mode records which picker to return to;
+            -- grep_filters carries over the previous picker's filter configuration.
             local picker_state = {
                 mode = nil, -- "find_files" or "live_grep"
-                original_cwd = nil,
                 grep_filters = { include = {}, exclude = {} },
             }
 
@@ -830,7 +811,6 @@ require("lazy").setup({
                         -- <C-b>: Open directory picker
                         local function open_dir_picker()
                             picker_state.mode = "find_files"
-                            picker_state.original_cwd = path
                             actions.close(prompt_bufnr)
                             vim.schedule(function()
                                 directory_picker_for_mode(path)
@@ -884,7 +864,6 @@ require("lazy").setup({
                         -- <C-b>: Open directory picker
                         local function open_dir_picker()
                             picker_state.mode = "live_grep"
-                            picker_state.original_cwd = path
                             actions.close(prompt_bufnr)
                             vim.schedule(function()
                                 directory_picker_for_mode(path)
@@ -954,9 +933,7 @@ require("lazy").setup({
                                     smart_live_grep({ cwd = selected_dir })
                                 end
 
-                                -- Reset state
                                 picker_state.mode = nil
-                                picker_state.original_cwd = nil
                             end)
                         end
 
@@ -998,15 +975,16 @@ require("lazy").setup({
                 })
             end
 
+            local stop_insert = function()
+                vim.cmd("stopinsert")
+            end
             telescope.setup({
                 defaults = {
                     mappings = {
                         i = {
                             -- <Esc> in insert mode: stop insert but keep the picker open.
                             -- Default behaviour closes the picker entirely.
-                            ["<esc>"] = function()
-                                vim.cmd("stopinsert")
-                            end,
+                            ["<esc>"] = stop_insert,
                             -- <C-q>: send all current results to the quickfix list.
                             ["<C-q>"] = actions.send_to_qflist + actions.open_qflist,
                         },
@@ -1049,11 +1027,7 @@ require("lazy").setup({
                         -- depth = 1: show only immediate children, not a recursive tree.
                         depth = 1,
                         mappings = {
-                            i = {
-                                ["<esc>"] = function()
-                                    vim.cmd("stopinsert")
-                                end,
-                            },
+                            i = { ["<esc>"] = stop_insert },
                             n = {
                                 ["<esc>"] = actions.close,
                                 ["q"] = actions.close,
@@ -1071,7 +1045,6 @@ require("lazy").setup({
                 local ctx = get_buffer_context()
                 local start_path = ctx.is_real_file and ctx.dir or get_smart_cwd()
                 picker_state.mode = "find_files"
-                picker_state.original_cwd = start_path
                 directory_picker_for_mode(start_path)
             end, { desc = "Find files" })
 
@@ -1427,7 +1400,7 @@ require("lazy").setup({
                     -- Inlay hints
                     local client = vim.lsp.get_client_by_id(ev.data.client_id)
                     if client and client.server_capabilities.inlayHintProvider then
-                        vim.lsp.inlay_hint.enable(true, { bufnr = ev.buf })
+                        vim.lsp.inlay_hint.enable(false, { bufnr = ev.buf })
                     end
 
                     vim.keymap.set("n", "<leader>ih", function()
@@ -1610,19 +1583,12 @@ require("lazy").setup({
         keys = {
             {
                 "<leader>f",
-                function()
-                    -- lsp_fallback = false: only use the formatters listed above; no silent LSP fallback.
-                    require("conform").format({ async = true, lsp_fallback = false })
-                end,
-                desc = "Format buffer",
-            },
-            {
-                "<leader>f",
+                -- lsp_fallback = false: only use the formatters listed above; no silent LSP fallback.
                 function()
                     require("conform").format({ async = true, lsp_fallback = false })
                 end,
-                mode = "v",
-                desc = "Format selection",
+                mode = { "n", "v" },
+                desc = "Format buffer/selection",
             },
         },
     },
