@@ -385,12 +385,8 @@ _G._nvim_editor_open = function(file, sentinel)
             vim.fn.writefile(lines, abs_file)
         end
         write_sentinel()
-        if vim.api.nvim_win_is_valid(win) then
-            vim.api.nvim_win_close(win, true)
-        end
-        if vim.api.nvim_buf_is_valid(bufnr) then
-            pcall(vim.cmd, "bdelete! " .. bufnr)
-        end
+        pcall(vim.api.nvim_win_close, win, true)
+        pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
     end
 
     vim.keymap.set("n", "q", close, { buffer = bufnr, desc = "Send to Claude" })
@@ -417,56 +413,53 @@ end
 -- claudecode.nvim as the marker that identifies the proposed-change window.
 -- ============================================================================
 
--- Helper to safely read winbar (option may not exist on older Neovim).
-local function get_winbar(win)
-    local ok, val = pcall(vim.api.nvim_get_option_value, "winbar", { win = win })
-    return ok and val or nil
-end
-
 local function update_claudecode_diff_winbars()
-    -- Pass 1: identify windows that claudecode.nvim marked as proposed changes.
-    local proposed_wins = {}
-    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local all_wins = vim.api.nvim_tabpage_list_wins(0)
+    local has_proposed = false
+
+    -- Pass 1: label proposed windows and check if any exist.
+    for _, win in ipairs(all_wins) do
         if vim.api.nvim_win_is_valid(win) then
-            local buf = vim.api.nvim_win_get_buf(win)
-            local tab_name = vim.b[buf].claudecode_diff_tab_name
+            local tab_name = vim.b[vim.api.nvim_win_get_buf(win)].claudecode_diff_tab_name
             if tab_name then
-                table.insert(proposed_wins, { win = win, tab_name = tab_name })
+                has_proposed = true
+                pcall(
+                    vim.api.nvim_set_option_value,
+                    "winbar",
+                    "[ PROPOSED ]  " .. vim.fn.fnamemodify(tab_name, ":~:."),
+                    { win = win }
+                )
             end
         end
     end
 
-    -- No Claude Code diff active in this tab: clear all winbars we previously set.
-    if #proposed_wins == 0 then
-        for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-            if vim.api.nvim_win_is_valid(win) then
-                local wb = get_winbar(win)
-                if wb and (wb:match("^%[ PROPOSED %]") or wb:match("^%[ ORIGINAL %]")) then
-                    pcall(vim.api.nvim_set_option_value, "winbar", "", { win = win })
+    -- Pass 2: for unmarked windows, either label as ORIGINAL (if a diff is active
+    -- and the window is in diff mode) or clear our winbar (if no diff is active).
+    for _, win in ipairs(all_wins) do
+        if vim.api.nvim_win_is_valid(win) then
+            local buf = vim.api.nvim_win_get_buf(win)
+            if not vim.b[buf].claudecode_diff_tab_name then
+                if has_proposed and vim.wo[win].diff then
+                    local path = vim.api.nvim_buf_get_name(buf)
+                    local rel = path ~= "" and vim.fn.fnamemodify(path, ":~:.") or "[No Name]"
+                    pcall(
+                        vim.api.nvim_set_option_value,
+                        "winbar",
+                        "[ ORIGINAL ]  " .. rel,
+                        { win = win }
+                    )
+                elseif not has_proposed then
+                    local ok, wb = pcall(vim.api.nvim_get_option_value, "winbar", { win = win })
+                    if
+                        ok
+                        and wb
+                        and (wb:match("^%[ PROPOSED %]") or wb:match("^%[ ORIGINAL %]"))
+                    then
+                        pcall(vim.api.nvim_set_option_value, "winbar", "", { win = win })
+                    end
                 end
             end
         end
-        return
-    end
-
-    -- Pass 2: label proposed windows.
-    for _, info in ipairs(proposed_wins) do
-        local rel = vim.fn.fnamemodify(info.tab_name, ":~:.")
-        pcall(vim.api.nvim_set_option_value, "winbar", "[ PROPOSED ]  " .. rel, { win = info.win })
-    end
-
-    -- Pass 3: windows in diff mode without the claudecode marker are the originals.
-    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-        if not vim.api.nvim_win_is_valid(win) then
-            goto continue
-        end
-        local buf = vim.api.nvim_win_get_buf(win)
-        if not vim.b[buf].claudecode_diff_tab_name and vim.wo[win].diff then
-            local path = vim.api.nvim_buf_get_name(buf)
-            local rel = path ~= "" and vim.fn.fnamemodify(path, ":~:.") or "[No Name]"
-            pcall(vim.api.nvim_set_option_value, "winbar", "[ ORIGINAL ]  " .. rel, { win = win })
-        end
-        ::continue::
     end
 end
 
@@ -497,15 +490,18 @@ vim.api.nvim_create_autocmd("OptionSet", {
 -- Trigger with <leader>gH. Navigate with [g (older) / ]g (newer).
 -- Close everything with <leader>gq.
 -- ============================================================================
-local git_history_state = {
-    commits = {},
-    index = 0,
-    original_win = nil,
-    diff_buf = nil,
-    diff_win = nil,
-    info_buf = nil,
-    info_win = nil,
-}
+local function default_git_history_state()
+    return {
+        commits = {},
+        index = 0,
+        original_win = nil,
+        diff_buf = nil,
+        diff_win = nil,
+        info_buf = nil,
+        info_win = nil,
+    }
+end
+local git_history_state = default_git_history_state()
 local function update_info_win(commit_hash)
     if
         not git_history_state.info_win or not vim.api.nvim_win_is_valid(git_history_state.info_win)
@@ -521,11 +517,17 @@ local function update_info_win(commit_hash)
     local term = vim.api.nvim_open_term(buf, {})
     vim.api.nvim_win_set_buf(git_history_state.info_win, buf)
     git_history_state.info_buf = buf
-    if old_buf and vim.api.nvim_buf_is_valid(old_buf) then
-        vim.api.nvim_buf_delete(old_buf, { force = true })
-    end
+    pcall(vim.api.nvim_buf_delete, old_buf, { force = true })
 
-    local out = vim.fn.system("git show --no-patch --color=always --decorate " .. commit_hash)
+    local fmt = "%C(yellow)commit %H%C(auto)%d%C(reset)%n"
+        .. "Author: %C(bold cyan)%an%C(reset) -- %C(green)%ar%C(reset)%n"
+        .. "%C(bold)%s%C(reset)%n%b%n"
+    local out = vim.fn.system(
+        "git show --no-patch --color=always --pretty=tformat:"
+            .. vim.fn.shellescape(fmt)
+            .. " "
+            .. commit_hash
+    )
     vim.api.nvim_chan_send(term, out)
 end
 
@@ -553,7 +555,7 @@ local function show_commit_diff(commit_hash)
         vim.api.nvim_set_current_win(git_history_state.original_win)
         vim.cmd("topleft split")
         git_history_state.info_win = vim.api.nvim_get_current_win()
-        vim.api.nvim_win_set_height(git_history_state.info_win, 5)
+        vim.api.nvim_win_set_height(git_history_state.info_win, 4)
         -- Prevent the info window from being resized when Neovim re-balances
         -- windows (e.g. when the diff window is created below it).
         vim.wo[git_history_state.info_win].winfixheight = true
@@ -651,39 +653,24 @@ vim.keymap.set("n", "]g", function()
     end
 end, { desc = "Newer commit" })
 
+-- Close git history: tear down the 3-window layout and reset state.
+-- pcall throughout: this is a cleanup path -- if the layout is partially broken
+-- (window closed manually, session restored, etc.) we still want to kill whatever
+-- is alive and reset state. Partial success is fine.
+-- diffoff must be called while the window is current, so we switch before closing.
+-- Terminal buffers have bufhidden=hide and survive window close; delete explicitly.
 vim.keymap.set("n", "<leader>gq", function()
-    if
-        git_history_state.original_win and vim.api.nvim_win_is_valid(git_history_state.original_win)
-    then
-        vim.api.nvim_set_current_win(git_history_state.original_win)
+    if pcall(vim.api.nvim_set_current_win, git_history_state.diff_win) then
+        vim.cmd("diffoff")
+    end
+    pcall(vim.api.nvim_win_close, git_history_state.diff_win, true)
+    pcall(vim.api.nvim_win_close, git_history_state.info_win, true)
+    pcall(vim.api.nvim_buf_delete, git_history_state.info_buf, { force = true })
+    if pcall(vim.api.nvim_set_current_win, git_history_state.original_win) then
         vim.cmd("diffoff")
         pcall(vim.api.nvim_set_option_value, "winbar", "", { win = git_history_state.original_win })
     end
-    if git_history_state.diff_win and vim.api.nvim_win_is_valid(git_history_state.diff_win) then
-        vim.api.nvim_set_current_win(git_history_state.diff_win)
-        vim.cmd("diffoff")
-        vim.api.nvim_win_close(git_history_state.diff_win, true)
-    end
-    if git_history_state.info_win and vim.api.nvim_win_is_valid(git_history_state.info_win) then
-        vim.api.nvim_win_close(git_history_state.info_win, true)
-    end
-    if git_history_state.info_buf and vim.api.nvim_buf_is_valid(git_history_state.info_buf) then
-        vim.api.nvim_buf_delete(git_history_state.info_buf, { force = true })
-    end
-    if
-        git_history_state.original_win and vim.api.nvim_win_is_valid(git_history_state.original_win)
-    then
-        vim.api.nvim_set_current_win(git_history_state.original_win)
-    end
-    git_history_state = {
-        commits = {},
-        index = 0,
-        original_win = nil,
-        diff_buf = nil,
-        diff_win = nil,
-        info_buf = nil,
-        info_win = nil,
-    }
+    git_history_state = default_git_history_state()
 end, { desc = "Close git history" })
 
 -- ============================================================================
@@ -1660,9 +1647,8 @@ require("lazy").setup({
             -- condition: only save real files (buftype == "") that are modifiable and named.
             -- Skips terminal buffers, scratch buffers, and unnamed new files.
             condition = function(buf)
-                return vim.bo[buf].buftype == ""
-                    and vim.bo[buf].modifiable
-                    and vim.fn.expand("%") ~= ""
+                local bo = vim.bo[buf]
+                return bo.buftype == "" and bo.modifiable and vim.fn.expand("%") ~= ""
             end,
             -- write_all_buffers = false: save only the current buffer on trigger.
             write_all_buffers = false,
