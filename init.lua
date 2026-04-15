@@ -786,7 +786,7 @@ require("lazy").setup({
         builtin.find_files({
           cwd = path,
           find_command = fd_command,
-          prompt_title = "📁" .. vim.fn.fnamemodify(path, ":~"),
+          prompt_title = "Find Files  [C-b: browse dir]",
           attach_mappings = function(prompt_bufnr, map)
             -- <C-b>: Open directory picker
             local function open_dir_picker()
@@ -887,8 +887,8 @@ require("lazy").setup({
           hidden = true,
           grouped = true,
           depth = 1, -- Don't recurse into subdirectories
-          prompt_title = "📁" .. vim.fn.fnamemodify(start_path, ":~"),
-          results_title = "Setting CWD to: " .. vim.fn.fnamemodify(vim.fn.getcwd(), ":~"),
+          prompt_title = "Dir Browse  [C-b: confirm]",
+          results_title = "cwd: " .. vim.fn.fnamemodify(vim.fn.getcwd(), ":~"),
           attach_mappings = function(prompt_bufnr, map)
             -- <C-b>: Select current directory and return to previous mode
             local function select_and_return()
@@ -1011,12 +1011,7 @@ require("lazy").setup({
       pcall(telescope.load_extension, "file_browser")
 
       -- PRIMARY KEYMAPS
-      vim.keymap.set("n", "<C-p>", function()
-        local ctx = get_buffer_context()
-        local start_path = ctx.is_real_file and ctx.dir or get_smart_cwd()
-        picker_state.mode = "find_files"
-        directory_picker_for_mode(start_path)
-      end, { desc = "Find files" })
+      vim.keymap.set("n", "<C-p>", function() smart_find_files() end, { desc = "Find files" })
 
       -- SEARCH NAMESPACE (leader-s)
       vim.keymap.set("n", "<leader>sr", builtin.resume, { desc = "Resume search" })
@@ -1359,6 +1354,23 @@ require("lazy").setup({
             vim.lsp.inlay_hint.enable(not enabled, { bufnr = 0 })
           end, { buffer = ev.buf, desc = "Toggle inlay hints" })
 
+          -- Pull fresh diagnostics after each save for clients that support the pull
+          -- model (textDocument/diagnostic, LSP 3.17). Push diagnostics are server-
+          -- initiated and may lag behind; this ensures the cache is refreshed right
+          -- after auto-save fires, when the server has had time to re-analyze.
+          if client and client.server_capabilities.diagnosticProvider then
+            vim.api.nvim_create_autocmd("BufWritePost", {
+              buffer = ev.buf,
+              callback = function()
+                vim.lsp.buf_request(
+                  ev.buf,
+                  "textDocument/diagnostic",
+                  { textDocument = { uri = vim.uri_from_bufnr(ev.buf) } }
+                )
+              end,
+            })
+          end
+
           -- Debug helper: shows which directory the LSP picked as the project root.
           -- Useful to verify that clangd/pyright found the right compile_commands.json.
           vim.keymap.set("n", "<leader>pi", function()
@@ -1552,8 +1564,6 @@ require("lazy").setup({
     event = { "InsertLeave", "TextChanged" },
     opts = {
       enabled = true,
-      -- execution_message disabled: no status-line noise on each save.
-      execution_message = { enabled = false },
       trigger_events = {
         immediate_save = { "BufLeave", "FocusLost" },
         defer_save = { "InsertLeave", "TextChanged" },
