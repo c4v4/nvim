@@ -1,6 +1,17 @@
 -- ============================================================================
 -- init.lua -- Neovim configuration
 --
+-- LOCAL PATCH NOTE (remove when upstream fixes the bug):
+--   claudecode.nvim closes ALL diff-mode windows on closeAllDiffTabs, including
+--   non-plugin splits (Gdiffsplit, git history viewer, etc.). Fix:
+--   In ~/.local/share/nvim/lazy/claudecode.nvim/lua/claudecode/tools/close_all_diff_tabs.lua
+--   change line ~34 from:
+--     if diff_mode then
+--   to:
+--     if diff_mode and vim.b[buf].claudecode_diff_tab_name then
+--   Upstream issue: https://github.com/coder/claudecode.nvim/issues/277
+--   Plugin commit at time of patch: 7c7d47e75d1c8597a676ca20b36a8b85a776ac61
+--
 -- Single-file setup (no lua/ subdirectory). Plugins are managed by lazy.nvim.
 --
 -- Sections (in order):
@@ -507,6 +518,15 @@ local function update_info_win(commit_hash)
 end
 
 local function show_commit_diff(commit_hash)
+  if
+    not git_history_state.original_win
+    or not vim.api.nvim_win_is_valid(git_history_state.original_win)
+  then
+    vim.notify("Git history: original window is gone -- use <leader>gH to restart", vim.log.levels.WARN)
+    git_history_state = default_git_history_state()
+    return
+  end
+
   local file = vim.fn.expand("%:p")
   -- Path relative to git root is required by git show. Using getcwd() was
   -- fragile: if cwd differs from git root the prefix strip failed silently.
@@ -623,17 +643,43 @@ end, { desc = "Newer commit" })
 -- is alive and reset state. Partial success is fine.
 -- diffoff must be called while the window is current, so we switch before closing.
 -- Terminal buffers have bufhidden=hide and survive window close; delete explicitly.
-vim.keymap.set("n", "<leader>gq", function()
-  if pcall(vim.api.nvim_set_current_win, git_history_state.diff_win) then vim.cmd("diffoff") end
-  pcall(vim.api.nvim_win_close, git_history_state.diff_win, true)
-  pcall(vim.api.nvim_win_close, git_history_state.info_win, true)
-  pcall(vim.api.nvim_buf_delete, git_history_state.info_buf, { force = true })
-  if pcall(vim.api.nvim_set_current_win, git_history_state.original_win) then
-    vim.cmd("diffoff")
-    set_winbar(git_history_state.original_win, "")
-  end
+local function close_git_history()
+  -- Snapshot and reset state first so the WinClosed autocmd below does not
+  -- re-enter when closing our own windows triggers it.
+  local state = git_history_state
   git_history_state = default_git_history_state()
-end, { desc = "Close git history" })
+
+  if pcall(vim.api.nvim_set_current_win, state.diff_win) then vim.cmd("diffoff") end
+  pcall(vim.api.nvim_win_close, state.diff_win, true)
+  pcall(vim.api.nvim_win_close, state.info_win, true)
+  pcall(vim.api.nvim_buf_delete, state.info_buf, { force = true })
+  if pcall(vim.api.nvim_set_current_win, state.original_win) then
+    vim.cmd("diffoff")
+    set_winbar(state.original_win, "")
+  end
+end
+
+-- Auto-reset state when any of the three tracked windows is closed externally
+-- (e.g. by claudecode's closeAllDiffTabs, or a manual :q).
+vim.api.nvim_create_autocmd("WinClosed", {
+  desc = "Reset git history state when its windows are closed externally",
+  callback = function(event)
+    local closed_win = tonumber(event.match)
+    if
+      git_history_state.original_win == nil
+      or (
+        closed_win ~= git_history_state.original_win
+        and closed_win ~= git_history_state.diff_win
+        and closed_win ~= git_history_state.info_win
+      )
+    then
+      return
+    end
+    close_git_history()
+  end,
+})
+
+vim.keymap.set("n", "<leader>gq", close_git_history, { desc = "Close git history" })
 
 -- ============================================================================
 -- PLUGIN MANAGER
@@ -935,18 +981,6 @@ require("lazy").setup({
         })
       end
 
-      -- File browser (standalone mode)
-      local function file_browser_mode()
-        local ctx = get_buffer_context()
-        local start_path = ctx.is_real_file and ctx.dir or get_smart_cwd()
-
-        telescope.extensions.file_browser.file_browser({
-          path = start_path,
-          cwd = start_path,
-          respect_gitignore = false,
-        })
-      end
-
       local stop_insert = function() vim.cmd("stopinsert") end
       telescope.setup({
         defaults = {
@@ -1015,7 +1049,15 @@ require("lazy").setup({
 
       -- SEARCH NAMESPACE (leader-s)
       vim.keymap.set("n", "<leader>sr", builtin.resume, { desc = "Resume search" })
-      vim.keymap.set("n", "<leader>sf", file_browser_mode, { desc = "File browser" })
+      -- <leader>sf: directory browser starting from the current buffer's directory.
+      -- Navigate dirs with Enter, open files with Enter, or press <C-b> to confirm
+      -- the selected dir and switch to fuzzy find_files inside it.
+      vim.keymap.set("n", "<leader>sf", function()
+        local ctx = get_buffer_context()
+        local start_path = ctx.is_real_file and ctx.dir or get_smart_cwd()
+        picker_state.mode = "find_files"
+        directory_picker_for_mode(start_path)
+      end, { desc = "Browse dir (from here)" })
       vim.keymap.set("n", "<leader>sg", smart_live_grep, { desc = "Search grep" })
       vim.keymap.set("n", "<leader>sb", builtin.buffers, { desc = "Search buffers" })
       vim.keymap.set(
@@ -1536,6 +1578,11 @@ require("lazy").setup({
         rust = { "rustfmt" },
         sh = { "shfmt" },
         bash = { "shfmt" },
+        json = { "jq" },
+      },
+      formatters = {
+        -- jq with 4-space indent to match the global tabstop setting.
+        jq = { args = { "--indent", "4" } },
       },
       -- format_on_save = false: formatting is explicit via <leader>f. Avoids surprises
       -- when a formatter is misconfigured or slow.
